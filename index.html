@@ -867,22 +867,58 @@ function rdpSimplify(points, epsilon){
 // Encodes the guest's confirmed details for the outbound QR (computer →
 // phone). Pipes are stripped from the fields since they're the delimiter —
 // names/companies/mobile numbers essentially never contain one anyway.
-function encodeHandoffPayload(id, name, company, mobile){
+//
+// Returns a LIST of candidates, from most-complete to most-truncated —
+// see the comment above createQrOrRetry() for why: this QR library's own
+// capacity math turns out to be unreliable close to its limit, so instead
+// of trying to precompute a safe byte budget, the caller just tries each
+// candidate against the real library until one actually succeeds. Company
+// name is shortened first (least essential for the phone-side signer to
+// see); name only as a last resort; the mobile number is never touched.
+function buildHandoffPayloadCandidates(id, name, company, mobile){
   const esc = s => String(s || '').replace(/\|/g, ' ');
-  return 'HS1|' + id + '|' + esc(name) + '|' + esc(company) + '|' + esc(mobile);
+  const n = esc(name), c = esc(company), m = esc(mobile);
+  const candidates = ['HS1|' + id + '|' + n + '|' + c + '|' + m];
+  [60, 30, 15, 6, 0].forEach(len => {
+    const cShort = c.length > len ? (len ? c.slice(0, len) + '…' : '') : c;
+    candidates.push('HS1|' + id + '|' + n + '|' + cShort + '|' + m);
+  });
+  [30, 15].forEach(len => {
+    const nShort = n.length > len ? n.slice(0, len) + '…' : n;
+    candidates.push('HS1|' + id + '|' + nShort + '||' + m);
+  });
+  return candidates;
+}
+
+// Tries to build a QR code from the first candidate that the library
+// actually accepts, clearing the container between attempts. This library
+// (qrcodejs 1.0.0) throws when a payload is too dense for a single code,
+// but its own internal capacity table is imprecise near the boundary —
+// it can reject text noticeably shorter than what it claims to support.
+// Rather than guess an exact safe byte count, just ask the real library
+// and fall back to a more-truncated/simplified candidate on failure.
+function createQrOrRetry(container, candidates, opts){
+  for(let i = 0; i < candidates.length; i++){
+    container.innerHTML = '';
+    try{
+      new QRCode(container, Object.assign({ text: candidates[i] }, opts));
+      return true;
+    }catch(e){ /* try the next candidate */ }
+  }
+  container.innerHTML = '';
+  return false;
 }
 
 // Encodes a signature (array of strokes, each an array of [x,y] points, in
 // the small coordinate grid WxH the phone captured them in) for the return
-// QR (phone → computer). Progressively simplifies the strokes until the
-// encoded text fits comfortably inside a single QR code — a detailed
-// signature may come back visibly blockier than it looked on the phone
-// screen; that's this trade-off, not a bug.
-function encodeSignaturePayload(id, strokes, W, H){
-  const SIZE_BUDGET = 900; // characters — well inside a single QR's real capacity
+// QR (phone → computer). Returns a LIST of progressively more-simplified
+// candidates (see createQrOrRetry above) — a detailed signature may come
+// back visibly blockier than it looked on the phone screen; that's this
+// trade-off, not a bug.
+function buildSignaturePayloadCandidates(id, strokes, W, H){
+  const candidates = [];
   let epsilon = 0.5;
-  let payload = null;
-  for(let attempt = 0; attempt < 14; attempt++){
+  for(let attempt = 0; attempt < 16; attempt++){
     const strokeStrs = strokes.map(stroke => {
       const simplified = rdpSimplify(stroke, epsilon);
       let out = '';
@@ -895,11 +931,11 @@ function encodeSignaturePayload(id, strokes, W, H){
       });
       return out;
     }).filter(Boolean);
-    payload = 'SIG1|' + id + '|' + W + 'x' + H + '|' + strokeStrs.join(';');
-    if(payload.length <= SIZE_BUDGET || epsilon > 30) break;
+    candidates.push('SIG1|' + id + '|' + W + 'x' + H + '|' + strokeStrs.join(';'));
+    if(epsilon > 40) break;
     epsilon *= 1.6;
   }
-  return payload;
+  return candidates;
 }
 
 function decodeSignaturePayload(text){
@@ -1010,12 +1046,14 @@ function openQrHandoff(name, company, mobile){
   $('qrHandoffStep1').style.display = 'block';
   $('qrHandoffStep2').style.display = 'none';
   $('qrHandoffStatus').textContent = '';
-  $('qrHandoffCodeWrap').innerHTML = '';
-  new QRCode($('qrHandoffCodeWrap'), {
-    text: encodeHandoffPayload(qrHandoffSessionId, name, company, mobile),
+  const candidates = buildHandoffPayloadCandidates(qrHandoffSessionId, name, company, mobile);
+  const ok = createQrOrRetry($('qrHandoffCodeWrap'), candidates, {
     width: 260, height: 260,
     correctLevel: QRCode.CorrectLevel.M
   });
+  if(!ok){
+    $('qrHandoffStatus').innerHTML = '<span style="color:var(--red);">⚠ Could not generate a QR code for this guest\'s details. Please ✕ Cancel and sign directly on this screen instead.</span>';
+  }
 }
 function closeQrHandoff(){
   stopQrScanLoop();
