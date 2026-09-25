@@ -13,7 +13,7 @@
 // Bump CACHE_NAME whenever you want to force everyone's cached copy to
 // refresh (e.g. after a meaningful update to index.html) — the old cache is
 // deleted automatically on the next activate.
-const CACHE_NAME = 'voucher-checkin-v5';
+const CACHE_NAME = 'voucher-checkin-v6';
 
 // This one service worker now covers FOUR separate pages in this repo:
 // index.html (phone check-in counter), scan_station.html (computer scan
@@ -34,7 +34,7 @@ const APP_SHELL_URLS = [
   'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
   'https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js',
   'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js',
-  'https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.2.4/+esm',
+  'https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.2.4/lib/index.js',
   'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
   'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js'
 ];
