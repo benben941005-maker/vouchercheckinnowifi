@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Offline Check-In / Check-Out</title>
+<!-- No Firebase anywhere in this file, on purpose — this page is for a
+     computer with NO network at all. Everything it does (scanning, matching
+     against an imported registration list, saving check-ins, exporting to
+     Excel) stays on this one device, in this browser's local storage.
+     There is no sync to any other device or to the phone/tablet check-in
+     app — export to Excel and combine manually after the event if needed. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<!-- QR handoff to a phone/iPad for signing — see qr_sign.html, deployed
+     alongside this file. Two libraries, both used entirely offline once
+     cached: QRCode.js draws the outgoing code (name/company/mobile) for the
+     guest's phone to scan, jsQR decodes the code the phone shows back
+     (the signature, compressed into a QR code) using this computer's own
+     camera. Nothing here is tested against a real phone/camera yet — see
+     the comments around qrSignBtn further down for the full explanation
+     and the fallback if it doesn't work reliably on-site. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<!-- Local, in-browser OCR (Baidu's PaddleOCR, via @paddlejs-models/ocr),
+     loaded lazily via a dynamic import() further down — same engine and
+     fallback logic as the other two apps in this project. Google Vision is
+     still tried FIRST if a key is set and this computer happens to have a
+     connection at that moment, but nothing here assumes or requires it. -->
+<script>
+  const PADDLE_OCR_MODULE_URL = 'https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.2.4/+esm';
+</script>
+<style>
+  :root{
+    --green:#1e8e3e; --green-bg:#e6f4ea;
+    --red:#c5221f; --red-bg:#fce8e6;
+    --amber:#b06000; --amber-bg:#fef3e0;
+    --blue:#1a73e8; --blue-bg:#e8f0fe; --border:#dadce0; --text:#202124; --muted:#5f6368;
+  }
+  *{box-sizing:border-box;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;background:#f6f7f9;color:var(--text);}
+  header{background:#fff;border-bottom:1px solid var(--border);padding:14px 16px;position:sticky;top:0;z-index:10;}
+  header h1{font-size:18px;margin:0;}
+  header .sub{font-size:12px;color:var(--muted);margin-top:2px;}
+  main{max-width:720px;margin:0 auto;padding:16px;padding-bottom:80px;}
+  .card{background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;}
+  .card h2{font-size:14px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);margin:0 0 12px;}
+  button{font-size:15px;font-weight:600;border-radius:8px;border:none;padding:12px 16px;cursor:pointer;}
+  .btn-primary{background:var(--blue);color:#fff;width:100%;}
+  .btn-primary:disabled{background:#9aa0a6;cursor:not-allowed;}
+  .btn-secondary{background:#fff;color:var(--blue);border:1px solid var(--blue);width:100%;}
+  .btn-secondary:disabled{color:#9aa0a6;border-color:#dadce0;cursor:not-allowed;}
+  .btn-danger{background:#fff;color:var(--red);border:1px solid var(--red);}
+  .btn-small{padding:6px 10px;font-size:12px;width:auto;}
+  .btn-row{display:flex;gap:10px;}
+  .btn-row button{flex:1;}
+  input[type=text]{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;}
+  input[type=text].no-match{border-color:var(--red);background:var(--red-bg);color:var(--red);}
+  label{font-size:13px;color:var(--muted);font-weight:600;}
+  .field{margin-bottom:12px;}
+  #preview{max-width:100%;display:none;border-radius:8px;margin-top:10px;border:1px solid var(--border);}
+  .camera-view{display:none;position:relative;margin-top:10px;background:#000;border-radius:8px;overflow:hidden;}
+  .camera-view video{width:100%;display:block;}
+  .camera-guide{position:absolute;top:18%;left:8%;width:84%;height:64%;border:3px solid #34d399;border-radius:8px;box-shadow:0 0 0 9999px rgba(0,0,0,0.45);pointer-events:none;}
+  .camera-hint{position:absolute;bottom:8px;left:0;right:0;text-align:center;color:#fff;font-size:12px;text-shadow:0 1px 2px rgba(0,0,0,.7);pointer-events:none;}
+  #ocrStatus{font-size:13px;color:var(--muted);margin-top:8px;min-height:18px;}
+  .banner{padding:14px;border-radius:8px;font-weight:600;margin-bottom:16px;display:none;}
+  .banner.ok{background:var(--green-bg);color:var(--green);display:block;}
+  .banner.dup{background:var(--red-bg);color:var(--red);display:block;}
+  .banner.warn{background:var(--amber-bg);color:var(--amber);display:block;font-weight:500;font-size:13px;}
+  table{width:100%;border-collapse:collapse;font-size:12px;}
+  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--border);vertical-align:middle;}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;}
+  .count-pill{display:inline-block;background:#e8eaed;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;margin-left:6px;}
+  .empty{color:var(--muted);font-size:13px;text-align:center;padding:20px 0;}
+  .status-badge{display:inline-block;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;}
+  .status-in{background:var(--amber-bg);color:var(--amber);}
+  .status-out{background:var(--green-bg);color:var(--green);}
+  .raw-text{white-space:pre-wrap;font-size:12px;background:#f1f3f4;border-radius:6px;padding:8px;max-height:120px;overflow:auto;color:var(--muted);margin-top:8px;}
+  details summary{font-size:12px;color:var(--blue);cursor:pointer;margin-top:6px;}
+  .settings-bar{font-size:12px;color:var(--muted);}
+  .settings-bar.set{color:var(--green);}
+  .settings-bar summary{cursor:pointer;color:var(--blue);}
+  .key-row{display:flex;gap:8px;margin-top:8px;}
+  .key-row input{flex:1;}
+  .key-row button{white-space:nowrap;padding:10px 14px;}
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:flex-start;justify-content:center;padding:20px 16px;overflow-y:auto;z-index:100;}
+  .modal-overlay.open{display:flex;}
+  .modal-box{background:#fff;border-radius:12px;padding:20px;max-width:420px;width:100%;margin-top:40px;}
+  .modal-box h3{margin:0 0 4px;font-size:16px;}
+  #sigCanvas{width:100%;height:140px;border:1px solid var(--border);border-radius:8px;background:#fff;touch-action:none;display:block;margin-top:4px;}
+  .sig-thumb{height:22px;max-width:60px;border:1px solid var(--border);border-radius:3px;cursor:pointer;background:#fff;margin-right:4px;vertical-align:middle;}
+  .muted-dash{color:var(--muted);}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Offline Check-In / Check-Out</h1>
+  <div class="sub">For a computer with NO network — everything stays on this device only. Export to Excel to combine with other records.</div>
+</header>
+
+<main>
+
+  <div class="banner" id="resultBanner"></div>
+
+  <div class="card">
+    <h2>Conference Registration List <span class="count-pill" id="regCountPill">0</span></h2>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+      While you still had network, export the registration list to Excel from the conference registration app, then import that file here — this computer can then auto-fill Organization/Mobile No. and flag unmatched names, entirely offline.
+    </div>
+    <input type="file" accept=".xlsx,.xls,.csv" id="importRegFile" style="display:none">
+    <div class="btn-row">
+      <button class="btn-secondary" id="importRegBtn">📥 Import Registration File</button>
+      <button class="btn-danger" id="clearRegBtn">🗑 Clear Imported List</button>
+    </div>
+    <div id="regImportStatus" style="font-size:12px;color:var(--muted);margin-top:8px;"></div>
+  </div>
+
+  <div class="card">
+    <details class="settings-bar" id="settingsDetails">
+      <summary>⚙ Google Vision API Key (optional — only used if this computer does have a connection)</summary>
+      <div class="key-row">
+        <input type="text" id="apiKeyInput" placeholder="Paste your Google Cloud Vision API key">
+        <button class="btn-secondary" id="saveKeyBtn" style="width:auto;">Save</button>
+      </div>
+      <div id="apiKeyStatus" style="margin-top:6px;"></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>1. Scan Name Card</h2>
+    <input type="file" accept="image/*" capture="environment" id="cameraInput" style="display:none">
+    <input type="file" accept="image/*" id="fileInput" style="display:none">
+    <div class="btn-row">
+      <button class="btn-primary" id="takePhotoBtn">📷 Use Camera</button>
+      <button class="btn-secondary" id="choosePhotoBtn">🖼 Upload Photo</button>
+    </div>
+    <div class="camera-view" id="cameraView">
+      <video id="cameraVideo" autoplay playsinline muted></video>
+      <div class="camera-guide"></div>
+      <div class="camera-hint">将姓名对准框内再拍照 / Align the name inside the box, then capture</div>
+    </div>
+    <div class="btn-row" id="cameraControls" style="display:none;margin-top:10px;">
+      <button class="btn-primary" id="captureBtn">📸 Capture</button>
+      <button class="btn-danger" id="cancelCameraBtn">✕ Cancel</button>
+    </div>
+    <img id="preview" style="display:none;">
+    <div id="ocrStatus"></div>
+    <details id="rawTextWrap" style="display:none;">
+      <summary>Show raw scanned text</summary>
+      <div class="raw-text" id="rawText"></div>
+    </details>
+  </div>
+
+  <div class="card" id="confirmCard" style="display:none;">
+    <h2>2. Confirm Details</h2>
+    <div class="field">
+      <label for="nameInput">Name</label>
+      <input type="text" id="nameInput" placeholder="Edit if OCR got it wrong">
+    </div>
+    <div class="field">
+      <label for="companyInput">Company / Organization</label>
+      <input type="text" id="companyInput" placeholder="Company name">
+    </div>
+    <div class="field">
+      <label for="mobileInput">Mobile No.</label>
+      <input type="text" id="mobileInput" placeholder="Mobile number">
+    </div>
+    <div id="registrationMatchNote" style="display:none;font-size:12px;color:var(--green);background:var(--green-bg);padding:8px 10px;border-radius:8px;margin-bottom:12px;"></div>
+    <div id="similarWarning"></div>
+    <div class="field">
+      <label for="sigCanvas">Signature (required)</label>
+      <canvas id="sigCanvas" width="600" height="180"></canvas>
+      <div class="btn-row" style="margin-top:8px;">
+        <button type="button" class="btn-secondary btn-small" id="clearSigBtn" style="width:auto;">✕ Clear Signature</button>
+        <button type="button" class="btn-secondary btn-small" id="qrSignBtn" style="width:auto;">📱 Sign via Phone/iPad</button>
+      </div>
+      <div id="qrSignNote" style="display:none;font-size:12px;color:var(--blue);background:var(--blue-bg);padding:6px 10px;border-radius:8px;margin-top:6px;"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" id="checkinActionBtn">✓ Check In</button>
+      <button class="btn-secondary" id="checkoutActionBtn">↩ Check Out</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Records <span class="count-pill" id="countPill">0</span></h2>
+    <div style="overflow-x:auto;">
+      <div id="tableWrap"><div class="empty">No check-ins yet.</div></div>
+    </div>
+    <div class="btn-row" style="margin-top:14px;">
+      <button class="btn-secondary" id="exportBtn">⬇ Export to Excel</button>
+      <button class="btn-danger" id="clearBtn">🗑 Clear All Records</button>
+    </div>
+  </div>
+
+</main>
+
+<div class="modal-overlay" id="sigViewOverlay">
+  <div class="modal-box" style="max-width:360px;">
+    <h3 id="sigViewTitle">Signature</h3>
+    <img id="sigViewImg" style="width:100%;border:1px solid var(--border);border-radius:8px;background:#fff;">
+    <div class="btn-row" style="margin-top:14px;">
+      <button class="btn-primary" id="sigViewCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="qrHandoffOverlay">
+  <div class="modal-box" style="max-width:400px;text-align:center;">
+    <h3>Sign via Phone/iPad</h3>
+    <div id="qrHandoffStep1">
+      <p style="font-size:13px;color:var(--muted);">Have the guest scan this with their phone/iPad camera, then sign there.</p>
+      <div id="qrHandoffCodeWrap" style="display:flex;justify-content:center;margin:16px 0;"></div>
+      <div class="btn-row">
+        <button class="btn-primary" id="qrScanBackBtn">📷 Scan Signature From Phone</button>
+      </div>
+    </div>
+    <div id="qrHandoffStep2" style="display:none;">
+      <p style="font-size:13px;color:var(--muted);">Point this camera at the QR code now shown on the guest's phone/iPad.</p>
+      <video id="qrScanVideo" autoplay playsinline muted style="width:100%;border-radius:8px;background:#000;"></video>
+    </div>
+    <div id="qrHandoffStatus" style="font-size:12px;color:var(--muted);margin-top:10px;min-height:16px;"></div>
+    <div class="btn-row" style="margin-top:14px;">
+      <button class="btn-danger" id="qrHandoffCancelBtn">✕ Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Caches this page's own shell (and everything it downloads — the OCR
+// engine, the Excel libraries) the first time it's opened online, using the
+// same sw.js as the other apps in this project, so it can be reopened later
+// with truly zero network. Safe to skip silently if unsupported/missing.
+if('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(err => {
+      console.warn('Offline app cache (service worker) did not register:', err.message);
+    });
+  });
+}
+window.addEventListener('load', () => { primeLocalOcrIfNeeded(); });
+
+const $ = id => document.getElementById(id);
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function normalize(name){
+  return name.replace(/\s+/g,'').toLowerCase();
+}
+function showBanner(type, text){
+  const b = $('resultBanner');
+  b.className = 'banner ' + type;
+  b.textContent = text;
+}
+function clearBanner(){
+  const b = $('resultBanner');
+  b.className = 'banner';
+  b.textContent = '';
+}
+function fmtTime(ms){
+  if(!ms) return '—';
+  return new Date(ms).toLocaleString(undefined, { year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:true });
+}
+function todayEventId(){
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+function dateKeyFromMs(ms){
+  if(!ms) return 'unknown';
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+// --- Everything below is stored ONLY in this browser's local storage — no
+// server, no sync, nothing shared with any other device. ---
+const STORAGE_KEY = 'localCheckinData_v1';
+let entries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+function saveEntries(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(entries)); }
+function todayEntries(){
+  const todayKey = todayEventId();
+  return entries.filter(e => dateKeyFromMs(e.checkInAtMs) === todayKey);
+}
+
+// --- Imported conference registration list (from an Excel/CSV file, not
+// Firebase) — used only to auto-fill Organization/Mobile No. and flag
+// unmatched names, exactly like the online apps do against Firestore. ---
+const IMPORTED_REGISTRATIONS_KEY = 'importedRegistrations_v1';
+let registrations = JSON.parse(localStorage.getItem(IMPORTED_REGISTRATIONS_KEY) || '[]');
+
+function refreshRegistrationImportUi(){
+  $('regCountPill').textContent = registrations.length;
+  $('regImportStatus').textContent = registrations.length
+    ? `${registrations.length} registration(s) loaded on this device.`
+    : 'No registration list imported yet — Organization/Mobile No. will need to be typed in manually for everyone.';
+}
+refreshRegistrationImportUi();
+
+$('importRegBtn').addEventListener('click', () => $('importRegFile').click());
+$('clearRegBtn').addEventListener('click', () => {
+  if(!confirm('Clear the imported registration list from this device?')) return;
+  registrations = [];
+  localStorage.setItem(IMPORTED_REGISTRATIONS_KEY, JSON.stringify(registrations));
+  refreshRegistrationImportUi();
+});
+
+// Finds each needed column by matching header text loosely (rather than an
+// exact label), so this still works even if the registration export's exact
+// wording changes slightly. "mobile" excludes the "linked to PayNow" column
+// on purpose — that one also contains the word "mobile".
+function findColumnIndex(headers, patterns, exclude){
+  for(let i = 0; i < headers.length; i++){
+    const h = String(headers[i] || '').toLowerCase();
+    if(exclude && exclude.some(x => h.includes(x))) continue;
+    if(patterns.some(p => h.includes(p))) return i;
+  }
+  return -1;
+}
+
+function parseRegistrationRows(rows){
+  if(!rows || !rows.length) return [];
+  const headers = rows[0];
+  const col = {
+    chineseName: findColumnIndex(headers, ['chinese name', '中文姓名']),
+    englishName: findColumnIndex(headers, ['english name', '英文名字']),
+    organization: findColumnIndex(headers, ['organization', '单位']),
+    mobile: findColumnIndex(headers, ['mobile', '手机'], ['paynow']),
+    email: findColumnIndex(headers, ['email', '电邮']),
+    physicianNo: findColumnIndex(headers, ['physician', '中医师'])
+  };
+  const get = (row, idx) => idx >= 0 && row[idx] != null ? String(row[idx]).trim() : '';
+  const out = [];
+  for(let r = 1; r < rows.length; r++){
+    const row = rows[r];
+    if(!row || !row.length) continue;
+    const entry = {
+      chineseName: get(row, col.chineseName),
+      englishName: get(row, col.englishName),
+      organization: get(row, col.organization),
+      mobile: get(row, col.mobile),
+      email: get(row, col.email),
+      physicianNo: get(row, col.physicianNo)
+    };
+    if(entry.chineseName || entry.englishName) out.push(entry);
+  }
+  return out;
+}
+
+$('importRegFile').addEventListener('change', e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try{
+      const data = new Uint8Array(ev.target.result);
+      const wb = XLSX.read(data, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+      const list = parseRegistrationRows(rows);
+      if(!list.length){
+        alert('Could not find any usable rows in this file — make sure it\'s the registration export.');
+        return;
+      }
+      registrations = list;
+      localStorage.setItem(IMPORTED_REGISTRATIONS_KEY, JSON.stringify(registrations));
+      refreshRegistrationImportUi();
+      showBanner('ok', `✓ Imported ${list.length} registration(s).`);
+    }catch(err){
+      alert('Could not read this file: ' + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+function findRegistrationMatch(name){
+  const norm = normalize(name);
+  if(!norm) return null;
+  return registrations.find(r =>
+    (r.chineseName && normalize(r.chineseName) === norm) ||
+    (r.englishName && normalize(r.englishName) === norm)
+  ) || null;
+}
+
+function applyRegistrationMatch(match){
+  const note = $('registrationMatchNote');
+  const companyInput = $('companyInput');
+  const mobileInput = $('mobileInput');
+  if(!match){
+    note.className = '';
+    note.style.display = 'block';
+    note.style.color = 'var(--red)';
+    note.style.background = 'var(--red-bg)';
+    note.innerHTML = '✗ No matching conference registration found — please check/type Organization and Mobile No. manually.';
+    companyInput.classList.add('no-match');
+    mobileInput.classList.add('no-match');
+    return;
+  }
+  companyInput.classList.remove('no-match');
+  mobileInput.classList.remove('no-match');
+  if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
+  if(!mobileInput.value.trim() && match.mobile) mobileInput.value = match.mobile;
+  const parts = [];
+  if(match.englishName) parts.push(match.englishName);
+  if(match.organization) parts.push(match.organization);
+  if(match.mobile) parts.push(match.mobile);
+  note.style.display = 'block';
+  note.style.color = 'var(--green)';
+  note.style.background = 'var(--green-bg)';
+  note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '');
+}
+
+function findExistingEntry(name){
+  const norm = normalize(name);
+  if(!norm) return null;
+  return todayEntries().find(e => normalize(e.name) === norm) || null;
+}
+function applyExistingEntry(existing){
+  const note = $('registrationMatchNote');
+  const companyInput = $('companyInput');
+  const mobileInput = $('mobileInput');
+  companyInput.classList.remove('no-match');
+  mobileInput.classList.remove('no-match');
+  if(!companyInput.value.trim() && existing.company) companyInput.value = existing.company;
+  if(!mobileInput.value.trim() && existing.mobile) mobileInput.value = existing.mobile;
+  note.style.display = 'block';
+  note.style.color = 'var(--blue)';
+  note.style.background = 'var(--blue-bg)';
+  note.innerHTML = '↩ Already checked in at ' + escapeHtml(fmtTime(existing.checkInAtMs)) +
+    ' — Organization/Mobile No. copied from that check-in record.' +
+    (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '');
+}
+function autoFillFromName(name){
+  const existing = findExistingEntry(name);
+  if(existing){ applyExistingEntry(existing); return; }
+  applyRegistrationMatch(findRegistrationMatch(name));
+}
+$('nameInput').addEventListener('input', e => {
+  checkSimilar(e.target.value);
+  autoFillFromName(e.target.value);
+});
+
+function levenshtein(a,b){
+  const m=a.length, n=b.length;
+  const dp = Array.from({length:m+1},(_,i)=>[i,...Array(n).fill(0)]);
+  for(let j=0;j<=n;j++) dp[0][j]=j;
+  for(let i=1;i<=m;i++){
+    for(let j=1;j<=n;j++){
+      dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j-1],dp[i-1][j],dp[i][j-1]);
+    }
+  }
+  return dp[m][n];
+}
+function checkSimilar(name){
+  const norm = normalize(name);
+  if(!norm || norm.length < 2){ $('similarWarning').innerHTML = ''; return; }
+  const near = todayEntries().find(e => {
+    const en = normalize(e.name);
+    return en !== norm && levenshtein(en, norm) <= 1;
+  });
+  if(near){
+    $('similarWarning').innerHTML = `<div class="banner warn">Note: a similar name "${escapeHtml(near.name)}" was already checked in today. Please verify this isn't the same person.</div>`;
+  } else {
+    $('similarWarning').innerHTML = '';
+  }
+}
+
+// --- Google Vision API key (optional) ---
+const API_KEY_STORAGE = 'gcvApiKey_v1';
+function getApiKey(){ return localStorage.getItem(API_KEY_STORAGE) || ''; }
+function refreshKeyUi(){
+  const key = getApiKey();
+  const details = $('settingsDetails');
+  const status = $('apiKeyStatus');
+  if(key){
+    $('apiKeyInput').value = key;
+    details.className = 'settings-bar set';
+    status.textContent = 'Saved. Will be tried first if this computer has a connection at scan time.';
+  } else {
+    details.className = 'settings-bar';
+    status.textContent = 'Not set — every scan will go straight to local offline recognition.';
+  }
+}
+$('saveKeyBtn').addEventListener('click', () => {
+  const val = $('apiKeyInput').value.trim();
+  if(!val){ alert('Please paste a valid API key.'); return; }
+  localStorage.setItem(API_KEY_STORAGE, val);
+  refreshKeyUi();
+});
+refreshKeyUi();
+
+// --- Photo capture (identical to the other two apps in this project) ---
+let mediaStream = null;
+$('takePhotoBtn').addEventListener('click', openCamera);
+$('choosePhotoBtn').addEventListener('click', () => $('fileInput').click());
+$('cameraInput').addEventListener('change', e => handleUploadedFile(e.target.files[0]));
+$('fileInput').addEventListener('change', e => handleUploadedFile(e.target.files[0]));
+$('cancelCameraBtn').addEventListener('click', closeCamera);
+$('captureBtn').addEventListener('click', captureFromCamera);
+
+async function openCamera(){
+  clearBanner();
+  $('confirmCard').style.display = 'none';
+  $('rawTextWrap').style.display = 'none';
+  $('ocrStatus').textContent = '';
+  $('preview').style.display = 'none';
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    $('cameraInput').click();
+    return;
+  }
+  try{
+    mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    const video = $('cameraVideo');
+    video.srcObject = mediaStream;
+    await video.play();
+    $('cameraView').style.display = 'block';
+    $('cameraControls').style.display = 'flex';
+  }catch(err){
+    $('cameraInput').click();
+  }
+}
+function closeCamera(){
+  if(mediaStream){
+    mediaStream.getTracks().forEach(t => t.stop());
+    mediaStream = null;
+  }
+  $('cameraView').style.display = 'none';
+  $('cameraControls').style.display = 'none';
+}
+function captureFromCamera(){
+  const video = $('cameraVideo');
+  const guide = document.querySelector('.camera-guide');
+  const videoRect = video.getBoundingClientRect();
+  const guideRect = guide.getBoundingClientRect();
+  const scaleX = video.videoWidth / videoRect.width;
+  const scaleY = video.videoHeight / videoRect.height;
+  const sx = (guideRect.left - videoRect.left) * scaleX;
+  const sy = (guideRect.top - videoRect.top) * scaleY;
+  const sw = guideRect.width * scaleX;
+  const sh = guideRect.height * scaleY;
+  const canvas = document.createElement('canvas');
+  canvas.width = sw;
+  canvas.height = sh;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  closeCamera();
+  $('preview').src = dataUrl;
+  $('preview').style.display = 'block';
+  runOcr(dataUrl);
+}
+function handleUploadedFile(file){
+  if(!file) return;
+  clearBanner();
+  $('confirmCard').style.display = 'none';
+  $('rawTextWrap').style.display = 'none';
+  $('ocrStatus').textContent = '';
+  const reader = new FileReader();
+  reader.onload = ev => {
+    $('preview').src = ev.target.result;
+    $('preview').style.display = 'block';
+    runOcr(ev.target.result);
+  };
+  reader.readAsDataURL(file);
+}
+
+// --- OCR: Google Vision first (only if a key is saved AND this computer
+// happens to have a connection right now), local PaddleOCR fallback
+// otherwise — identical logic/engine to the other two apps in this project.
+async function runOcr(dataUrl){
+  $('ocrStatus').textContent = 'Reading name card…';
+
+  let rawText = null;
+  let visionErr = null;
+  const apiKey = getApiKey();
+  if(!apiKey){
+    visionErr = new Error('No Google Vision API key set on this device');
+  }else{
+    try{
+      const base64 = dataUrl.split(',')[1];
+      const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          requests: [{
+            image: { content: base64 },
+            features: [{ type: 'TEXT_DETECTION' }],
+            imageContext: { languageHints: ['zh-Hant', 'zh', 'en'] }
+          }]
+        })
+      });
+      const data = await resp.json();
+      const result = data.responses && data.responses[0];
+      if(result && result.error){ throw new Error(result.error.message || 'Google Vision API error'); }
+      rawText = (result && result.fullTextAnnotation && result.fullTextAnnotation.text) || '';
+    }catch(err){
+      visionErr = err;
+    }
+  }
+
+  if(rawText !== null){
+    const name = guessName(rawText);
+    $('rawText').textContent = rawText || '(no response)';
+    $('rawTextWrap').style.display = rawText ? 'block' : 'none';
+    $('ocrStatus').textContent = name ? 'Scan complete. Please confirm the name below.' : 'Could not read a name clearly — please type it manually.';
+    $('nameInput').value = name;
+    $('companyInput').value = '';
+    $('mobileInput').value = '';
+    $('confirmCard').style.display = 'block';
+    checkSimilar(name);
+    autoFillFromName(name);
+    return;
+  }
+
+  $('ocrStatus').textContent = 'Google Vision unavailable (' + visionErr.message + ') — trying local offline recognition…';
+  try{
+    const localText = await localOcrRecognize(dataUrl);
+    const name = guessName(localText);
+    $('rawText').textContent = localText || '(no response)';
+    $('rawTextWrap').style.display = localText ? 'block' : 'none';
+    $('ocrStatus').innerHTML = '<span style="color:var(--amber);">⚠ Used local offline recognition (lower accuracy than usual) — please double-check the name below.</span>';
+    $('nameInput').value = name;
+    $('companyInput').value = '';
+    $('mobileInput').value = '';
+    $('confirmCard').style.display = 'block';
+    checkSimilar(name);
+    autoFillFromName(name);
+  }catch(localErr){
+    $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(visionErr.message) + '. Please type the name manually.</span>';
+    $('nameInput').value = '';
+    $('companyInput').value = '';
+    $('mobileInput').value = '';
+    $('confirmCard').style.display = 'block';
+    applyRegistrationMatch(null);
+  }
+}
+
+const COMPANY_HINTS = /(pte\.?\s*ltd|pty\.?\s*ltd|\bltd\.?\b|\bllc\b|\bllp\b|\binc\.?\b|\bcorp\.?\b|company|\bco\.?\b|group|holdings|enterprise|centre|center|clinic|hospital|pharmacy|association|society|institute|foundation|有限公司|股份公司|公司|集团|药行|药业|药局|诊所|医院|中心|协会|学会|基金会)/i;
+const TITLE_HINTS = /(manager|director|president|chairman|founder|\bceo\b|\bcfo\b|\bcoo\b|executive|consultant|specialist|physician|doctor|\bdr\.?\b|\bprof\.?\b|professor|经理|总监|董事|总裁|主任|医师|医生|教授|顾问|负责人|marketing|officer)/i;
+const CONTACT_HINTS = /(@|https?:\/\/|www\.|电话|手机|传真|邮箱|email|tel:|fax:|address|地址)/i;
+function guessName(rawText){
+  if(!rawText) return '';
+  const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+  const candidates = [];
+  for(const line of lines){
+    if(COMPANY_HINTS.test(line)) continue;
+    if(TITLE_HINTS.test(line)) continue;
+    if(CONTACT_HINTS.test(line)) continue;
+    if(/\d/.test(line)) continue;
+    candidates.push(line);
+  }
+  const chineseName = candidates.find(l => /^[一-鿿·]{2,4}$/.test(l));
+  if(chineseName) return chineseName;
+  const englishName = candidates.find(l => /^[A-Za-z][A-Za-z.\-' ]{1,40}$/.test(l) && l.split(/\s+/).length <= 4);
+  if(englishName) return englishName;
+  return candidates[0] || lines[0] || '';
+}
+
+// --- Local (in-browser) OCR — identical to the other two apps. ---
+let paddleOcrModulePromise = null;
+let paddleOcrInitPromise = null;
+function loadPaddleOcrModule(){
+  if(!paddleOcrModulePromise){
+    paddleOcrModulePromise = import(/* webpackIgnore: true */ PADDLE_OCR_MODULE_URL);
+  }
+  return paddleOcrModulePromise;
+}
+async function ensurePaddleOcrReady(){
+  const mod = await loadPaddleOcrModule();
+  if(!paddleOcrInitPromise){
+    paddleOcrInitPromise = mod.init().catch(err => { paddleOcrInitPromise = null; throw err; });
+  }
+  await paddleOcrInitPromise;
+  return mod;
+}
+function loadImageFromDataUrl(dataUrl){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Could not decode the captured photo for local OCR'));
+    img.src = dataUrl;
+  });
+}
+async function localOcrRecognize(dataUrl){
+  const mod = await ensurePaddleOcrReady();
+  const img = await loadImageFromDataUrl(dataUrl);
+  const res = await mod.recognize(img);
+  const text = res && res.text;
+  if(Array.isArray(text)) return text.join('\n');
+  return text || '';
+}
+const LOCAL_OCR_PRIMED_KEY = 'localOcrPrimed_v2';
+function primeLocalOcrIfNeeded(){
+  try{
+    if(localStorage.getItem(LOCAL_OCR_PRIMED_KEY)) return;
+    if(!navigator.onLine) return;
+    ensurePaddleOcrReady()
+      .then(() => { try{ localStorage.setItem(LOCAL_OCR_PRIMED_KEY, '1'); }catch(e){} })
+      .catch(err => console.warn('Local OCR warm-up did not finish:', err.message));
+  }catch(e){}
+}
+
+// --- Signature pad (identical to the other two apps) ---
+const sigCanvas = $('sigCanvas');
+const sigCtx = sigCanvas.getContext('2d');
+let sigDrawing = false;
+let sigHasStroke = false;
+let sigLastPoint = null;
+function resetSignaturePad(){
+  sigCtx.clearRect(0, 0, sigCanvas.width, sigCanvas.height);
+  sigCtx.fillStyle = '#fff';
+  sigCtx.fillRect(0, 0, sigCanvas.width, sigCanvas.height);
+  sigHasStroke = false;
+}
+function sigPointerPos(e){
+  const rect = sigCanvas.getBoundingClientRect();
+  const scaleX = sigCanvas.width / rect.width;
+  const scaleY = sigCanvas.height / rect.height;
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+}
+sigCanvas.addEventListener('pointerdown', e => {
+  sigDrawing = true;
+  sigHasStroke = true;
+  sigLastPoint = sigPointerPos(e);
+  sigCanvas.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+sigCanvas.addEventListener('pointermove', e => {
+  if(!sigDrawing) return;
+  const p = sigPointerPos(e);
+  sigCtx.strokeStyle = '#1a1a1a';
+  sigCtx.lineWidth = 2.5;
+  sigCtx.lineCap = 'round';
+  sigCtx.lineJoin = 'round';
+  sigCtx.beginPath();
+  sigCtx.moveTo(sigLastPoint.x, sigLastPoint.y);
+  sigCtx.lineTo(p.x, p.y);
+  sigCtx.stroke();
+  sigLastPoint = p;
+  e.preventDefault();
+});
+function endSigStroke(){ sigDrawing = false; }
+sigCanvas.addEventListener('pointerup', endSigStroke);
+sigCanvas.addEventListener('pointerleave', endSigStroke);
+sigCanvas.addEventListener('pointercancel', endSigStroke);
+$('clearSigBtn').addEventListener('click', resetSignaturePad);
+resetSignaturePad();
+function getSignatureDataUrl(){
+  if(!sigHasStroke) return null;
+  return sigCanvas.toDataURL('image/png');
+}
+
+// --- Sign via Phone/iPad, via QR codes, with NO network/server at all ---
+// This exists because a mouse/trackpad makes for a bad signature, but a
+// phone/iPad touchscreen is natural to sign on. With no server allowed and
+// no guaranteed shared WiFi, the two devices "talk" by scanning QR codes off
+// each other's screens: this computer shows a QR with the guest's Name/
+// Company/Mobile, the guest's phone (running qr_sign.html) scans it, they
+// sign there, and the phone shows a NEW QR encoding that signature — which
+// this computer scans back with its own camera to complete the record.
+//
+// IMPORTANT — this has NOT been tested against a real phone/camera. Real
+// risks: QR-scanning a screen (vs. print) can be flaky with glare or a low
+// screen brightness; a very detailed signature might get simplified into a
+// blockier shape than a real pen signature to fit inside one QR code; older
+// devices may prompt for camera permission in ways that need a reload. Test
+// this end-to-end well before the event, in the actual lighting you'll be
+// using — and if it's ever unreliable on-site, "✕ Cancel" and just sign
+// directly on this screen (mouse/trackpad, or a plugged-in signature pad)
+// instead. Nothing about check-in itself depends on this working.
+
+// Ramer-Douglas-Peucker line simplification: reduces a stroke's point count
+// while keeping its overall shape, so a signature can be compressed enough
+// to fit in a single QR code.
+function rdpSimplify(points, epsilon){
+  if(points.length < 3) return points.slice();
+  function perpDist(p, a, b){
+    const dx = b[0]-a[0], dy = b[1]-a[1];
+    const len = Math.hypot(dx, dy);
+    if(len === 0) return Math.hypot(p[0]-a[0], p[1]-a[1]);
+    return Math.abs(dy*p[0] - dx*p[1] + b[0]*a[1] - b[1]*a[0]) / len;
+  }
+  function section(pts){
+    if(pts.length < 3) return pts;
+    let maxDist = 0, index = 0;
+    const a = pts[0], b = pts[pts.length-1];
+    for(let i = 1; i < pts.length - 1; i++){
+      const d = perpDist(pts[i], a, b);
+      if(d > maxDist){ maxDist = d; index = i; }
+    }
+    if(maxDist > epsilon){
+      const left = section(pts.slice(0, index+1));
+      const right = section(pts.slice(index));
+      return left.slice(0, -1).concat(right);
+    }
+    return [a, b];
+  }
+  return section(points);
+}
+
+// Encodes the guest's confirmed details for the outbound QR (computer →
+// phone). Pipes are stripped from the fields since they're the delimiter —
+// names/companies/mobile numbers essentially never contain one anyway.
+function encodeHandoffPayload(id, name, company, mobile){
+  const esc = s => String(s || '').replace(/\|/g, ' ');
+  return 'HS1|' + id + '|' + esc(name) + '|' + esc(company) + '|' + esc(mobile);
+}
+
+// Encodes a signature (array of strokes, each an array of [x,y] points, in
+// the small coordinate grid WxH the phone captured them in) for the return
+// QR (phone → computer). Progressively simplifies the strokes until the
+// encoded text fits comfortably inside a single QR code — a detailed
+// signature may come back visibly blockier than it looked on the phone
+// screen; that's this trade-off, not a bug.
+function encodeSignaturePayload(id, strokes, W, H){
+  const SIZE_BUDGET = 900; // characters — well inside a single QR's real capacity
+  let epsilon = 0.5;
+  let payload = null;
+  for(let attempt = 0; attempt < 14; attempt++){
+    const strokeStrs = strokes.map(stroke => {
+      const simplified = rdpSimplify(stroke, epsilon);
+      let out = '';
+      let prevX = null, prevY = null;
+      simplified.forEach((p, i) => {
+        const x = Math.round(p[0]), y = Math.round(p[1]);
+        if(i === 0){ out += x + ':' + y; }
+        else { out += ',' + (x - prevX) + ':' + (y - prevY); }
+        prevX = x; prevY = y;
+      });
+      return out;
+    }).filter(Boolean);
+    payload = 'SIG1|' + id + '|' + W + 'x' + H + '|' + strokeStrs.join(';');
+    if(payload.length <= SIZE_BUDGET || epsilon > 30) break;
+    epsilon *= 1.6;
+  }
+  return payload;
+}
+
+function decodeSignaturePayload(text){
+  if(!text || text.indexOf('SIG1|') !== 0) return null;
+  const firstBar = text.indexOf('|');
+  const secondBar = text.indexOf('|', firstBar + 1);
+  const thirdBar = text.indexOf('|', secondBar + 1);
+  if(firstBar < 0 || secondBar < 0 || thirdBar < 0) return null;
+  const id = text.slice(firstBar + 1, secondBar);
+  const dims = text.slice(secondBar + 1, thirdBar).split('x').map(Number);
+  const strokesRaw = text.slice(thirdBar + 1);
+  const strokes = strokesRaw.split(';').filter(Boolean).map(s => {
+    const out = [];
+    let x = 0, y = 0;
+    s.split(',').forEach((p, i) => {
+      const bits = p.split(':').map(Number);
+      if(i === 0){ x = bits[0]; y = bits[1]; }
+      else { x += bits[0]; y += bits[1]; }
+      out.push([x, y]);
+    });
+    return out;
+  });
+  return { id, W: dims[0], H: dims[1], strokes };
+}
+
+// Continuously scans camera frames for a QR code until one decodes and the
+// caller's onDecoded returns true (stop) — returning false/undefined keeps
+// scanning, so a stray or stale QR in view doesn't derail it.
+let qrScanActive = false;
+let qrScanStream = null;
+async function startQrScanLoop(videoEl, onDecoded, onError){
+  stopQrScanLoop();
+  try{
+    qrScanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+  }catch(err){
+    try{
+      qrScanStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }catch(err2){
+      if(onError) onError(err2);
+      return;
+    }
+  }
+  videoEl.srcObject = qrScanStream;
+  await videoEl.play();
+  qrScanActive = true;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  function tick(){
+    if(!qrScanActive) return;
+    if(videoEl.readyState === videoEl.HAVE_ENOUGH_DATA && videoEl.videoWidth){
+      canvas.width = videoEl.videoWidth;
+      canvas.height = videoEl.videoHeight;
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      try{
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+        if(code && code.data){
+          const stop = onDecoded(code.data);
+          if(stop){ stopQrScanLoop(); return; }
+        }
+      }catch(e){ /* transient decode error — just try the next frame */ }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+function stopQrScanLoop(){
+  qrScanActive = false;
+  if(qrScanStream){
+    qrScanStream.getTracks().forEach(t => t.stop());
+    qrScanStream = null;
+  }
+}
+
+// Draws a decoded signature (small-grid vector strokes) onto the real
+// sigCanvas, scaled up to its actual size — after this, getSignatureDataUrl()
+// works exactly as if the guest had drawn directly on this screen.
+function drawDecodedSignature(decoded){
+  resetSignaturePad();
+  const scaleX = sigCanvas.width / decoded.W;
+  const scaleY = sigCanvas.height / decoded.H;
+  sigCtx.strokeStyle = '#1a1a1a';
+  sigCtx.fillStyle = '#1a1a1a';
+  sigCtx.lineWidth = 2.5;
+  sigCtx.lineCap = 'round';
+  sigCtx.lineJoin = 'round';
+  decoded.strokes.forEach(stroke => {
+    if(stroke.length === 1){
+      sigCtx.beginPath();
+      sigCtx.arc(stroke[0][0]*scaleX, stroke[0][1]*scaleY, 1.5, 0, Math.PI*2);
+      sigCtx.fill();
+      return;
+    }
+    sigCtx.beginPath();
+    sigCtx.moveTo(stroke[0][0]*scaleX, stroke[0][1]*scaleY);
+    for(let i = 1; i < stroke.length; i++){
+      sigCtx.lineTo(stroke[i][0]*scaleX, stroke[i][1]*scaleY);
+    }
+    sigCtx.stroke();
+  });
+  sigHasStroke = true;
+}
+
+let qrHandoffSessionId = null;
+function openQrHandoff(name, company, mobile){
+  qrHandoffSessionId = Math.random().toString(36).slice(2, 10);
+  $('qrHandoffOverlay').classList.add('open');
+  $('qrHandoffStep1').style.display = 'block';
+  $('qrHandoffStep2').style.display = 'none';
+  $('qrHandoffStatus').textContent = '';
+  $('qrHandoffCodeWrap').innerHTML = '';
+  new QRCode($('qrHandoffCodeWrap'), {
+    text: encodeHandoffPayload(qrHandoffSessionId, name, company, mobile),
+    width: 260, height: 260,
+    correctLevel: QRCode.CorrectLevel.M
+  });
+}
+function closeQrHandoff(){
+  stopQrScanLoop();
+  $('qrHandoffOverlay').classList.remove('open');
+}
+$('qrHandoffCancelBtn').addEventListener('click', closeQrHandoff);
+$('qrSignBtn').addEventListener('click', () => {
+  const name = $('nameInput').value.trim();
+  if(!name){ alert('Please enter a name first.'); return; }
+  openQrHandoff(name, $('companyInput').value.trim(), $('mobileInput').value.trim());
+});
+$('qrScanBackBtn').addEventListener('click', () => {
+  $('qrHandoffStep1').style.display = 'none';
+  $('qrHandoffStep2').style.display = 'block';
+  $('qrHandoffStatus').textContent = 'Opening camera…';
+  startQrScanLoop($('qrScanVideo'), data => {
+    const decoded = decodeSignaturePayload(data);
+    if(!decoded || decoded.id !== qrHandoffSessionId) return false; // not our code (yet) — keep scanning
+    drawDecodedSignature(decoded);
+    closeQrHandoff();
+    $('qrSignNote').style.display = 'block';
+    $('qrSignNote').textContent = '✓ Signature received from phone/iPad — please glance at it below before checking in.';
+    return true;
+  }, err => {
+    $('qrHandoffStatus').innerHTML = '<span style="color:var(--red);">Camera error: ' + escapeHtml(err.message) + '. Try "✕ Cancel" and sign directly here instead.</span>';
+  });
+});
+
+function openSigView(src, label){
+  $('sigViewTitle').textContent = label || 'Signature';
+  $('sigViewImg').src = src;
+  $('sigViewOverlay').classList.add('open');
+}
+$('sigViewCloseBtn').addEventListener('click', () => $('sigViewOverlay').classList.remove('open'));
+
+function resetCaptureUi(){
+  $('confirmCard').style.display = 'none';
+  $('preview').style.display = 'none';
+  $('ocrStatus').textContent = '';
+  $('rawTextWrap').style.display = 'none';
+  $('cameraInput').value = '';
+  $('fileInput').value = '';
+  resetSignaturePad();
+  applyRegistrationMatch(null);
+  closeQrHandoff();
+  $('qrSignNote').style.display = 'none';
+}
+
+let sharedAudioCtx = null;
+function getAudioCtx(){
+  try{
+    if(!sharedAudioCtx){ sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    if(sharedAudioCtx.state === 'suspended'){ sharedAudioCtx.resume().catch(() => {}); }
+    return sharedAudioCtx;
+  }catch(e){ return null; }
+}
+function playSuccessTone(){
+  try{
+    const ctx = getAudioCtx();
+    if(!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.3, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    osc.start(now);
+    osc.stop(now + 0.2);
+  }catch(e){}
+}
+function playErrorTone(){
+  try{
+    const ctx = getAudioCtx();
+    if(!ctx) return;
+    const now = ctx.currentTime;
+    for(let i = 0; i < 2; i++){
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = 330;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      const start = now + i * 0.28;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.35, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
+      osc.start(start);
+      osc.stop(start + 0.24);
+    }
+  }catch(e){}
+}
+
+$('checkinActionBtn').addEventListener('click', () => {
+  const name = $('nameInput').value.trim();
+  const company = $('companyInput').value.trim();
+  const mobile = $('mobileInput').value.trim();
+  if(!name){ alert('Please enter a name before checking in.'); return; }
+
+  const registrationMatch = findRegistrationMatch(name);
+  if(!registrationMatch && !mobile){
+    alert('No matching conference registration found for this name. Please type in the Mobile No. manually before checking in.');
+    $('mobileInput').focus();
+    return;
+  }
+  const signature = getSignatureDataUrl();
+  if(!signature){ alert('Please have the guest sign before checking in.'); return; }
+
+  getAudioCtx();
+
+  const norm = normalize(name);
+  const existing = todayEntries().find(e => normalize(e.name) === norm);
+  if(existing){
+    showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
+    playErrorTone();
+    resetCaptureUi();
+    return;
+  }
+
+  const nowMs = Date.now();
+  entries.push({
+    id: todayEventId() + '__' + norm, name, company,
+    checkInAtMs: nowMs, checkOutAtMs: null,
+    checkInSignature: signature, checkOutSignature: null,
+    mobile: mobile || '',
+    email: (registrationMatch && registrationMatch.email) || '',
+    physicianNo: (registrationMatch && registrationMatch.physicianNo) || '',
+    registrationMatched: !!registrationMatch
+  });
+  showBanner('ok', `✓ ${name} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`);
+  playSuccessTone();
+  saveEntries();
+  renderTable();
+  resetCaptureUi();
+});
+
+$('checkoutActionBtn').addEventListener('click', () => {
+  const name = $('nameInput').value.trim();
+  if(!name){ alert('Please enter a name before checking out.'); return; }
+  const signature = getSignatureDataUrl();
+  if(!signature){ alert('Please have the guest sign before checking out.'); return; }
+
+  getAudioCtx();
+  const norm = normalize(name);
+  const existing = todayEntries().find(e => normalize(e.name) === norm);
+  if(!existing){
+    showBanner('warn', `⚠ No check-in found for ${name} today — check them in first.`);
+    playErrorTone();
+    return;
+  }
+  if(existing.checkOutAtMs){
+    showBanner('dup', `⚠ ${name} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
+    playErrorTone();
+    resetCaptureUi();
+    return;
+  }
+  existing.checkOutAtMs = Date.now();
+  existing.checkOutSignature = signature;
+  showBanner('ok', `✓ ${name} checked out at ${fmtTime(existing.checkOutAtMs)}.`);
+  playSuccessTone();
+  saveEntries();
+  renderTable();
+  resetCaptureUi();
+});
+
+function renderTable(){
+  $('countPill').textContent = entries.length;
+  if(!entries.length){
+    $('tableWrap').innerHTML = '<div class="empty">No check-ins yet.</div>';
+    return;
+  }
+  const rows = entries.slice().reverse().map(e => {
+    const statusBadge = e.checkOutAtMs
+      ? '<span class="status-badge status-out">Checked Out</span>'
+      : '<span class="status-badge status-in">Checked In</span>';
+    const sigIn = e.checkInSignature
+      ? `<img class="sig-thumb" data-sig-label="Check-in signature — ${escapeHtml(e.name)}" src="${e.checkInSignature}">`
+      : '<span class="muted-dash">—</span>';
+    const sigOut = e.checkOutSignature
+      ? `<img class="sig-thumb" data-sig-label="Check-out signature — ${escapeHtml(e.name)}" src="${e.checkOutSignature}">`
+      : '<span class="muted-dash">—</span>';
+    return `<tr>
+      <td>${escapeHtml(e.name)}</td>
+      <td>${escapeHtml(e.company||'')}</td>
+      <td>${fmtTime(e.checkInAtMs)}</td>
+      <td>${fmtTime(e.checkOutAtMs)}</td>
+      <td>${statusBadge}</td>
+      <td>${sigIn}${sigOut}</td>
+    </tr>`;
+  }).join('');
+  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Company</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('tableWrap').querySelectorAll('.sig-thumb').forEach(img => {
+    img.addEventListener('click', () => openSigView(img.src, img.getAttribute('data-sig-label')));
+  });
+}
+renderTable();
+
+$('clearBtn').addEventListener('click', () => {
+  if(!confirm('Clear ALL check-in/check-out records on this device? This cannot be undone — export to Excel first if you need to keep them.')) return;
+  entries = [];
+  saveEntries();
+  renderTable();
+});
+
+// Exporting with ExcelJS (not SheetJS) specifically because SheetJS's free
+// build cannot embed images into a workbook — only ExcelJS can place the
+// actual signature PNGs into their own cells. Same column layout as the
+// online check-in app's export, so the two can be combined easily.
+function dataUrlToBase64AndExt(dataUrl){
+  const match = /^data:image\/(png|jpeg);base64,(.*)$/.exec(dataUrl || '');
+  if(!match) return null;
+  return { base64: match[2], extension: match[1] === 'jpeg' ? 'jpeg' : 'png' };
+}
+$('exportBtn').addEventListener('click', async () => {
+  if(entries.length === 0){ alert('No check-ins to export yet.'); return; }
+  const btn = $('exportBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Preparing…';
+  try{
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Check-Ins');
+    sheet.addRow(['Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature']);
+    sheet.getRow(1).font = { bold: true };
+    sheet.columns = [
+      { width: 20 }, { width: 20 }, { width: 16 },
+      { width: 22 }, { width: 18 }, { width: 22 }, { width: 20 }, { width: 20 },
+      { width: 14 }, { width: 20 }, { width: 20 }
+    ];
+    entries.forEach((e, i) => {
+      const rowIndex = i + 2;
+      const matched = !!e.registrationMatched;
+      const statusText = e.checkOutAtMs ? 'Checked Out' : 'Checked In';
+      sheet.addRow([
+        e.name, e.company || '', e.mobile || '', e.email || '', e.physicianNo || '',
+        matched ? 'Matched' : 'No Match — Verify',
+        e.checkInAtMs ? new Date(e.checkInAtMs).toLocaleString() : '',
+        e.checkOutAtMs ? new Date(e.checkOutAtMs).toLocaleString() : '',
+        statusText, '', ''
+      ]);
+      sheet.getRow(rowIndex).height = 50;
+      if(!matched){
+        const matchCell = sheet.getRow(rowIndex).getCell(6);
+        matchCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE8E6' } };
+        matchCell.font = { color: { argb: 'FFC5221F' }, bold: true };
+      }
+      const sigIn = dataUrlToBase64AndExt(e.checkInSignature);
+      if(sigIn){
+        const imgId = workbook.addImage({ base64: sigIn.base64, extension: sigIn.extension });
+        sheet.addImage(imgId, { tl: { col: 9.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+      }
+      const sigOut = dataUrlToBase64AndExt(e.checkOutSignature);
+      if(sigOut){
+        const imgId = workbook.addImage({ base64: sigOut.base64, extension: sigOut.extension });
+        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+      }
+    });
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `offline_checkins_${todayEventId()}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }catch(err){
+    alert('Could not export: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+});
+</script>
+</body>
+</html>
