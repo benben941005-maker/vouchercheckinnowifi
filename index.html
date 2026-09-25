@@ -23,12 +23,18 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <!-- Local, in-browser OCR (Baidu's PaddleOCR, via @paddlejs-models/ocr),
-     loaded lazily via a dynamic import() further down — same engine and
+     loaded lazily as a plain classic script further down — same engine and
      fallback logic as the other two apps in this project. Google Vision is
      still tried FIRST if a key is set and this computer happens to have a
-     connection at that moment, but nothing here assumes or requires it. -->
+     connection at that moment, but nothing here assumes or requires it.
+     IMPORTANT: this file must be loaded as a plain <script src="...">, NOT
+     via the CDN's "/+esm" auto-conversion or a dynamic import() — that
+     bundled build embeds an OpenCV.js (Emscripten/WASM) module that relies
+     on old-style "this === window" global-script semantics, which breaks
+     ("Module is not defined") once it's wrapped as an ES module. Loading it
+     the classic way sets window.paddlejs.ocr instead. -->
 <script>
-  const PADDLE_OCR_MODULE_URL = 'https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.2.4/+esm';
+  const PADDLE_OCR_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.2.4/lib/index.js';
 </script>
 <style>
   :root{
@@ -666,11 +672,23 @@ function guessName(rawText){
 }
 
 // --- Local (in-browser) OCR — identical to the other two apps. ---
+// Loaded as a plain classic <script> (appended at runtime), not a dynamic
+// import() — see the comment near PADDLE_OCR_SCRIPT_URL in <head> for why.
 let paddleOcrModulePromise = null;
 let paddleOcrInitPromise = null;
 function loadPaddleOcrModule(){
   if(!paddleOcrModulePromise){
-    paddleOcrModulePromise = import(/* webpackIgnore: true */ PADDLE_OCR_MODULE_URL);
+    paddleOcrModulePromise = new Promise((resolve, reject) => {
+      if(window.paddlejs && window.paddlejs.ocr){ resolve(window.paddlejs.ocr); return; }
+      const script = document.createElement('script');
+      script.src = PADDLE_OCR_SCRIPT_URL;
+      script.onload = () => {
+        if(window.paddlejs && window.paddlejs.ocr){ resolve(window.paddlejs.ocr); }
+        else{ reject(new Error('Offline OCR script loaded but window.paddlejs.ocr was not defined')); }
+      };
+      script.onerror = () => reject(new Error('Could not load the offline OCR engine script — check network access to cdn.jsdelivr.net'));
+      document.head.appendChild(script);
+    }).catch(err => { paddleOcrModulePromise = null; throw err; });
   }
   return paddleOcrModulePromise;
 }
