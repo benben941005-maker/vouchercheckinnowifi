@@ -127,11 +127,19 @@ function decodeHandoffPayload(text){
   if(parts.length < 5) return null;
   return { id: parts[1], name: parts[2], company: parts[3], mobile: parts[4] };
 }
-function encodeSignaturePayload(id, strokes, W, H){
-  const SIZE_BUDGET = 900;
+// Returns a LIST of candidates, from most-detailed to most-simplified.
+// This QR library (qrcodejs 1.0.0) throws when a payload is too dense for
+// a single code, but its own internal capacity table turns out to be
+// imprecise near the boundary — it can reject text noticeably shorter
+// than what it claims to support. So instead of guessing an exact safe
+// byte count up front, createQrOrRetry() below just hands each candidate
+// to the real library in turn and uses the first one that actually works.
+// A detailed signature may come back visibly blockier than it looked when
+// drawn; that's this trade-off, not a bug.
+function buildSignaturePayloadCandidates(id, strokes, W, H){
+  const candidates = [];
   let epsilon = 0.5;
-  let payload = null;
-  for(let attempt = 0; attempt < 14; attempt++){
+  for(let attempt = 0; attempt < 16; attempt++){
     const strokeStrs = strokes.map(stroke => {
       const simplified = rdpSimplify(stroke, epsilon);
       let out = '';
@@ -144,11 +152,22 @@ function encodeSignaturePayload(id, strokes, W, H){
       });
       return out;
     }).filter(Boolean);
-    payload = 'SIG1|' + id + '|' + W + 'x' + H + '|' + strokeStrs.join(';');
-    if(payload.length <= SIZE_BUDGET || epsilon > 30) break;
+    candidates.push('SIG1|' + id + '|' + W + 'x' + H + '|' + strokeStrs.join(';'));
+    if(epsilon > 40) break;
     epsilon *= 1.6;
   }
-  return payload;
+  return candidates;
+}
+function createQrOrRetry(container, candidates, opts){
+  for(let i = 0; i < candidates.length; i++){
+    container.innerHTML = '';
+    try{
+      new QRCode(container, Object.assign({ text: candidates[i] }, opts));
+      return true;
+    }catch(e){ /* try the next, more-simplified candidate */ }
+  }
+  container.innerHTML = '';
+  return false;
 }
 let qrScanActive = false;
 let qrScanStream = null;
@@ -278,15 +297,17 @@ $('submitSigBtn').addEventListener('click', () => {
     $('signStatus').innerHTML = '<span style="color:var(--red);">Please sign first.</span>';
     return;
   }
-  const payload = encodeSignaturePayload(currentSessionId, strokes, sigCanvas.width, sigCanvas.height);
-  $('viewSign').style.display = 'none';
-  $('viewReturn').style.display = 'block';
-  $('returnQrWrap').innerHTML = '';
-  new QRCode($('returnQrWrap'), {
-    text: payload,
+  const candidates = buildSignaturePayloadCandidates(currentSessionId, strokes, sigCanvas.width, sigCanvas.height);
+  const ok = createQrOrRetry($('returnQrWrap'), candidates, {
     width: 260, height: 260,
     correctLevel: QRCode.CorrectLevel.M
   });
+  if(!ok){
+    $('signStatus').innerHTML = '<span style="color:var(--red);">⚠ Could not fit this signature into a QR code — please try signing again with fewer/simpler strokes.</span>';
+    return;
+  }
+  $('viewSign').style.display = 'none';
+  $('viewReturn').style.display = 'block';
 });
 
 $('doneNextBtn').addEventListener('click', () => {
