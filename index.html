@@ -130,6 +130,7 @@
 
   <div class="card">
     <h2>1. Scan Name Card</h2>
+    <div id="localOcrReadyNote" style="font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:10px;"></div>
     <input type="file" accept="image/*" capture="environment" id="cameraInput" style="display:none">
     <input type="file" accept="image/*" id="fileInput" style="display:none">
     <div class="btn-row">
@@ -698,15 +699,54 @@ async function localOcrRecognize(dataUrl){
   return text || '';
 }
 const LOCAL_OCR_PRIMED_KEY = 'localOcrPrimed_v2';
-function primeLocalOcrIfNeeded(){
-  try{
-    if(localStorage.getItem(LOCAL_OCR_PRIMED_KEY)) return;
-    if(!navigator.onLine) return;
-    ensurePaddleOcrReady()
-      .then(() => { try{ localStorage.setItem(LOCAL_OCR_PRIMED_KEY, '1'); }catch(e){} })
-      .catch(err => console.warn('Local OCR warm-up did not finish:', err.message));
-  }catch(e){}
+function setLocalOcrNote(html, bg, color){
+  const el = $('localOcrReadyNote');
+  if(!el) return;
+  el.innerHTML = html;
+  el.style.background = bg;
+  el.style.color = color;
 }
+function renderLocalOcrNoteIdle(){
+  const primed = (() => { try{ return !!localStorage.getItem(LOCAL_OCR_PRIMED_KEY); }catch(e){ return false; } })();
+  if(primed){
+    setLocalOcrNote('✅ Offline OCR is ready on this device — Google Vision AND local recognition will both work with no internet.', 'var(--green-bg)', 'var(--green)');
+  }else{
+    setLocalOcrNote(
+      '⚠ Offline OCR has not been downloaded on this device yet. It needs internet ONE TIME to download (~a few MB), then it works forever with no network. ' +
+      '<button id="primeOcrNowBtn" style="margin-left:6px;padding:3px 10px;border-radius:6px;border:1px solid var(--amber);background:#fff;color:var(--amber);cursor:pointer;font-size:12px;">Prepare now</button>',
+      'var(--amber-bg)', 'var(--amber)'
+    );
+    const btn = $('primeOcrNowBtn');
+    if(btn) btn.addEventListener('click', () => primeLocalOcrIfNeeded(true));
+  }
+}
+function primeLocalOcrIfNeeded(force){
+  try{
+    if(!force && localStorage.getItem(LOCAL_OCR_PRIMED_KEY)){ renderLocalOcrNoteIdle(); return; }
+  }catch(e){}
+  // Deliberately NOT gated on navigator.onLine — that flag is unreliable (it
+  // only reflects whether the network interface is up, not whether there's
+  // real internet behind it) and was previously causing this to silently
+  // never even attempt priming. Just try; the fetch itself will fail fast
+  // and cleanly if there's genuinely no connection.
+  setLocalOcrNote('⏳ Downloading offline OCR engine… please keep this device online for ~15–30 seconds.', 'var(--blue-bg)', 'var(--blue)');
+  ensurePaddleOcrReady()
+    .then(() => {
+      try{ localStorage.setItem(LOCAL_OCR_PRIMED_KEY, '1'); }catch(e){}
+      renderLocalOcrNoteIdle();
+    })
+    .catch(err => {
+      console.warn('Local OCR warm-up did not finish:', err.message);
+      setLocalOcrNote(
+        '⚠ Could not download the offline OCR engine (' + escapeHtml(err.message) + '). This device needs internet at least once — try again while connected to WiFi or mobile data. ' +
+        '<button id="primeOcrNowBtn" style="margin-left:6px;padding:3px 10px;border-radius:6px;border:1px solid var(--amber);background:#fff;color:var(--amber);cursor:pointer;font-size:12px;">Retry</button>',
+        'var(--amber-bg)', 'var(--amber)'
+      );
+      const btn = $('primeOcrNowBtn');
+      if(btn) btn.addEventListener('click', () => primeLocalOcrIfNeeded(true));
+    });
+}
+renderLocalOcrNoteIdle();
 
 // --- Signature pad (identical to the other two apps) ---
 const sigCanvas = $('sigCanvas');
