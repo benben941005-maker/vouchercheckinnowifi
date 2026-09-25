@@ -13,7 +13,7 @@
 // Bump CACHE_NAME whenever you want to force everyone's cached copy to
 // refresh (e.g. after a meaningful update to index.html) — the old cache is
 // deleted automatically on the next activate.
-const CACHE_NAME = 'voucher-checkin-v6';
+const CACHE_NAME = 'voucher-checkin-v7';
 
 // This one service worker now covers FOUR separate pages in this repo:
 // index.html (phone check-in counter), scan_station.html (computer scan
@@ -102,7 +102,13 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetch(req)
         .then(resp => {
-          caches.open(CACHE_NAME).then(cache => cache.put(req, resp.clone()));
+          // Clone SYNCHRONOUSLY, right here, before returning resp to the
+          // browser. caches.open() is itself async — if the clone happened
+          // inside its .then() callback instead, the browser could already
+          // be reading resp's body by the time that callback finally runs,
+          // and resp.clone() throws ("Response body is already used").
+          const respClone = resp.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(req, respClone));
           return resp;
         })
         .catch(() => caches.match(req).then(cached => cached || caches.match('./index.html')))
@@ -120,7 +126,8 @@ self.addEventListener('fetch', event => {
         if(cached) return cached;
         return fetch(req).then(resp => {
           if(resp && resp.ok){
-            caches.open(CACHE_NAME).then(cache => cache.put(req, resp.clone()));
+            const respClone = resp.clone(); // clone synchronously — see the note in the navigate branch above
+            caches.open(CACHE_NAME).then(cache => cache.put(req, respClone));
           }
           return resp;
         });
@@ -148,7 +155,8 @@ self.addEventListener('fetch', event => {
       if(cached) return cached;
       return fetch(req).then(resp => {
         if(resp && (resp.ok || resp.type === 'opaque')){
-          caches.open(CACHE_NAME).then(cache => cache.put(req, resp.clone()));
+          const respClone = resp.clone(); // clone synchronously — see the note in the navigate branch above
+          caches.open(CACHE_NAME).then(cache => cache.put(req, respClone));
         }
         return resp;
       });
