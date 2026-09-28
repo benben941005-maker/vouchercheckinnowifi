@@ -504,6 +504,24 @@ $('saveKeyBtn').addEventListener('click', () => {
 });
 refreshKeyUi();
 
+// Tries hardest to get the BACK/outward camera first, since that's what
+// you point at a name card or a screen. "ideal" alone is only a soft hint
+// — some devices/browsers still hand back the front camera anyway — so
+// this tries "exact" first (which throws if there's no rear camera, e.g.
+// some laptops/tablets) and only relaxes from there. Shared by both the
+// name-card camera and the QR scan loop below.
+async function getEnvironmentCameraStream(){
+  try{
+    return await navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: 'environment' } }, audio: false });
+  }catch(e1){
+    try{
+      return await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    }catch(e2){
+      return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
+  }
+}
+
 // --- Photo capture (identical to the other two apps in this project) ---
 let mediaStream = null;
 $('takePhotoBtn').addEventListener('click', openCamera);
@@ -524,7 +542,7 @@ async function openCamera(){
     return;
   }
   try{
-    mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    mediaStream = await getEnvironmentCameraStream();
     const video = $('cameraVideo');
     video.srcObject = mediaStream;
     await video.play();
@@ -969,14 +987,10 @@ let qrScanStream = null;
 async function startQrScanLoop(videoEl, onDecoded, onError){
   stopQrScanLoop();
   try{
-    qrScanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
-  }catch(err){
-    try{
-      qrScanStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    }catch(err2){
-      if(onError) onError(err2);
-      return;
-    }
+    qrScanStream = await getEnvironmentCameraStream();
+  }catch(err2){
+    if(onError) onError(err2);
+    return;
   }
   videoEl.srcObject = qrScanStream;
   await videoEl.play();
