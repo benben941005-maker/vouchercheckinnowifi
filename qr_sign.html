@@ -171,17 +171,29 @@ function createQrOrRetry(container, candidates, opts){
 }
 let qrScanActive = false;
 let qrScanStream = null;
+// Tries hardest to get the BACK/outward camera first, since that's what
+// you point at a screen or a name card. "ideal" alone is only a soft
+// hint — some phones/browsers still hand back the front camera anyway —
+// so this tries "exact" first (which throws if there's no rear camera,
+// e.g. some laptops/tablets) and only relaxes from there.
+async function getEnvironmentCameraStream(){
+  try{
+    return await navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: 'environment' } }, audio: false });
+  }catch(e1){
+    try{
+      return await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    }catch(e2){
+      return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
+  }
+}
 async function startQrScanLoop(videoEl, onDecoded, onError){
   stopQrScanLoop();
   try{
-    qrScanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
-  }catch(err){
-    try{
-      qrScanStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    }catch(err2){
-      if(onError) onError(err2);
-      return;
-    }
+    qrScanStream = await getEnvironmentCameraStream();
+  }catch(err2){
+    if(onError) onError(err2);
+    return;
   }
   videoEl.srcObject = qrScanStream;
   await videoEl.play();
