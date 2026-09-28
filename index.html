@@ -22,19 +22,30 @@
      and the fallback if it doesn't work reliably on-site. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-<!-- Local, in-browser OCR (Baidu's PaddleOCR, via @paddlejs-models/ocr),
-     loaded lazily as a plain classic script further down — same engine and
-     fallback logic as the other two apps in this project. Google Vision is
-     still tried FIRST if a key is set and this computer happens to have a
-     connection at that moment, but nothing here assumes or requires it.
-     IMPORTANT: this file must be loaded as a plain <script src="...">, NOT
-     via the CDN's "/+esm" auto-conversion or a dynamic import() — that
-     bundled build embeds an OpenCV.js (Emscripten/WASM) module that relies
-     on old-style "this === window" global-script semantics, which breaks
-     ("Module is not defined") once it's wrapped as an ES module. Loading it
-     the classic way sets window.paddlejs.ocr instead. -->
+<!-- Local, in-browser OCR — ppu-paddle-ocr (PP-OCRv6 models via ONNX
+     Runtime Web), used ONLY as a fallback when Google Vision can't be
+     reached (no network). Replaces the earlier @paddlejs-models/ocr engine:
+     that one's character set was missing some less-common Chinese
+     characters entirely (confirmed: 沄, 媺) and often confused others
+     (吴 → 昊) — this one's dictionary is much larger (~6,900+ characters
+     for the "small" model used below) and it has no OpenCV.js/Emscripten
+     baggage, so it loads as a normal ES module with no workarounds needed.
+     NOT tested against real hardware/real name cards — this swap was made
+     from source-code inspection only (no camera available here). The
+     import map below resolves this package's two non-relative
+     dependencies to their own CDN builds; everything else it imports is a
+     plain relative path served directly from jsdelivr, so no bundler is
+     needed. -->
+<script type="importmap">
+{
+  "imports": {
+    "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.bundle.min.mjs",
+    "ppu-ocv/canvas-web": "https://cdn.jsdelivr.net/npm/ppu-ocv@4.0.0/index.canvas-web.js"
+  }
+}
+</script>
 <script>
-  const PADDLE_OCR_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.2.4/lib/index.js';
+  const PPU_PADDLE_OCR_MODULE_URL = 'https://cdn.jsdelivr.net/npm/ppu-paddle-ocr@6.6.0/web/index.js';
 </script>
 <style>
   :root{
@@ -388,20 +399,50 @@ $('importRegFile').addEventListener('change', e => {
   reader.readAsArrayBuffer(file);
 });
 
+// The local offline OCR engine has a fixed, imperfect Chinese character
+// set: a handful of less-common characters (seen so far: 沄, 媺) aren't in
+// its vocabulary at all and can NEVER come out correctly no matter the
+// photo quality, and others it does know (吴, 葳, 溧, ...) it sometimes
+// misreads as a visually-similar character (e.g. 吴 → 昊). No amount of
+// app code can fix the OCR model itself — but since the imported
+// registration list already has the CORRECT spelling, a name that's off
+// by only one or two characters from exactly one registrant is very
+// likely still that same person. So: try an exact match first, and if
+// that fails, fall back to a fuzzy (edit-distance) match — but only when
+// it's unambiguous, and always flagged for staff to actually confirm
+// rather than auto-trusted like an exact match.
 function findRegistrationMatch(name){
   const norm = normalize(name);
   if(!norm) return null;
-  return registrations.find(r =>
+  const exact = registrations.find(r =>
     (r.chineseName && normalize(r.chineseName) === norm) ||
     (r.englishName && normalize(r.englishName) === norm)
-  ) || null;
+  );
+  if(exact) return { match: exact, fuzzy: false };
+  if(norm.length < 2) return null;
+  const maxDist = norm.length <= 4 ? 1 : 2;
+  let best = null, bestDist = Infinity, tie = false;
+  registrations.forEach(r => {
+    [r.chineseName, r.englishName].forEach(candidate => {
+      if(!candidate) return;
+      const cnorm = normalize(candidate);
+      if(!cnorm || Math.abs(cnorm.length - norm.length) > maxDist) return;
+      const d = levenshtein(cnorm, norm);
+      if(d < bestDist){ bestDist = d; best = r; tie = false; }
+      else if(d === bestDist && best !== r){ tie = true; }
+    });
+  });
+  if(best && bestDist > 0 && bestDist <= maxDist && !tie){
+    return { match: best, fuzzy: true };
+  }
+  return null;
 }
 
-function applyRegistrationMatch(match){
+function applyRegistrationMatch(result){
   const note = $('registrationMatchNote');
   const companyInput = $('companyInput');
   const mobileInput = $('mobileInput');
-  if(!match){
+  if(!result){
     note.className = '';
     note.style.display = 'block';
     note.style.color = 'var(--red)';
@@ -411,18 +452,37 @@ function applyRegistrationMatch(match){
     mobileInput.classList.add('no-match');
     return;
   }
+  const match = result.match;
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
   if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
   if(!mobileInput.value.trim() && match.mobile) mobileInput.value = match.mobile;
   const parts = [];
+  if(match.chineseName) parts.push(match.chineseName);
   if(match.englishName) parts.push(match.englishName);
   if(match.organization) parts.push(match.organization);
   if(match.mobile) parts.push(match.mobile);
   note.style.display = 'block';
-  note.style.color = 'var(--green)';
-  note.style.background = 'var(--green-bg)';
-  note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '');
+  if(result.fuzzy){
+    const correctName = match.chineseName || match.englishName || '';
+    note.style.color = 'var(--amber)';
+    note.style.background = 'var(--amber-bg)';
+    note.innerHTML = '⚠ Possible match (scanned name may have a misread character) — please confirm' +
+      (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '') +
+      (correctName ? ' <button type="button" id="useFuzzyNameBtn" style="margin-left:6px;padding:2px 8px;border-radius:6px;border:1px solid var(--amber);background:#fff;color:var(--amber);cursor:pointer;font-size:12px;">Use this name</button>' : '');
+    const btn = $('useFuzzyNameBtn');
+    if(btn){
+      btn.addEventListener('click', () => {
+        $('nameInput').value = correctName;
+        checkSimilar(correctName);
+        autoFillFromName(correctName);
+      });
+    }
+  } else {
+    note.style.color = 'var(--green)';
+    note.style.background = 'var(--green-bg)';
+    note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '');
+  }
 }
 
 function findExistingEntry(name){
@@ -690,33 +750,34 @@ function guessName(rawText){
 }
 
 // --- Local (in-browser) OCR — identical to the other two apps. ---
-// Loaded as a plain classic <script> (appended at runtime), not a dynamic
-// import() — see the comment near PADDLE_OCR_SCRIPT_URL in <head> for why.
+// Loaded via a normal dynamic import() — this package is a clean ES module
+// with only relative internal imports plus two bare specifiers
+// (onnxruntime-web, ppu-ocv/canvas-web) resolved by the <script
+// type="importmap"> in <head>. Unlike the old engine, nothing here needs a
+// classic-script workaround.
 let paddleOcrModulePromise = null;
-let paddleOcrInitPromise = null;
+let paddleOcrServicePromise = null;
 function loadPaddleOcrModule(){
   if(!paddleOcrModulePromise){
-    paddleOcrModulePromise = new Promise((resolve, reject) => {
-      if(window.paddlejs && window.paddlejs.ocr){ resolve(window.paddlejs.ocr); return; }
-      const script = document.createElement('script');
-      script.src = PADDLE_OCR_SCRIPT_URL;
-      script.onload = () => {
-        if(window.paddlejs && window.paddlejs.ocr){ resolve(window.paddlejs.ocr); }
-        else{ reject(new Error('Offline OCR script loaded but window.paddlejs.ocr was not defined')); }
-      };
-      script.onerror = () => reject(new Error('Could not load the offline OCR engine script — check network access to cdn.jsdelivr.net'));
-      document.head.appendChild(script);
-    }).catch(err => { paddleOcrModulePromise = null; throw err; });
+    paddleOcrModulePromise = import(/* webpackIgnore: true */ PPU_PADDLE_OCR_MODULE_URL);
   }
   return paddleOcrModulePromise;
 }
 async function ensurePaddleOcrReady(){
   const mod = await loadPaddleOcrModule();
-  if(!paddleOcrInitPromise){
-    paddleOcrInitPromise = mod.init().catch(err => { paddleOcrInitPromise = null; throw err; });
+  if(!paddleOcrServicePromise){
+    paddleOcrServicePromise = (async () => {
+      // V6_SMALL_MODEL over the package's default V6_TINY_MODEL: bigger
+      // model + the full (not reduced) character dictionary, on purpose —
+      // this device isn't network-constrained after the one-time download,
+      // so it's worth trading a larger download for better accuracy on
+      // less-common Chinese characters.
+      const service = new mod.PaddleOcrService({ model: mod.V6_SMALL_MODEL });
+      await service.initialize();
+      return service;
+    })().catch(err => { paddleOcrServicePromise = null; throw err; });
   }
-  await paddleOcrInitPromise;
-  return mod;
+  return paddleOcrServicePromise;
 }
 function loadImageFromDataUrl(dataUrl){
   return new Promise((resolve, reject) => {
@@ -727,14 +788,18 @@ function loadImageFromDataUrl(dataUrl){
   });
 }
 async function localOcrRecognize(dataUrl){
-  const mod = await ensurePaddleOcrReady();
+  const service = await ensurePaddleOcrReady();
   const img = await loadImageFromDataUrl(dataUrl);
-  const res = await mod.recognize(img);
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth || img.width;
+  canvas.height = img.naturalHeight || img.height;
+  canvas.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
+  const res = await service.recognize(canvas, { flatten: true });
   const text = res && res.text;
   if(Array.isArray(text)) return text.join('\n');
   return text || '';
 }
-const LOCAL_OCR_PRIMED_KEY = 'localOcrPrimed_v2';
+const LOCAL_OCR_PRIMED_KEY = 'localOcrPrimed_v3';
 function setLocalOcrNote(html, bg, color){
   const el = $('localOcrReadyNote');
   if(!el) return;
@@ -748,7 +813,7 @@ function renderLocalOcrNoteIdle(){
     setLocalOcrNote('✅ Offline OCR is ready on this device — Google Vision AND local recognition will both work with no internet.', 'var(--green-bg)', 'var(--green)');
   }else{
     setLocalOcrNote(
-      '⚠ Offline OCR has not been downloaded on this device yet. It needs internet ONE TIME to download (~a few MB), then it works forever with no network. ' +
+      '⚠ Offline OCR has not been downloaded on this device yet. It needs internet ONE TIME to download (~30MB, for the best accuracy on rare Chinese characters), then it works forever with no network. ' +
       '<button id="primeOcrNowBtn" style="margin-left:6px;padding:3px 10px;border-radius:6px;border:1px solid var(--amber);background:#fff;color:var(--amber);cursor:pointer;font-size:12px;">Prepare now</button>',
       'var(--amber-bg)', 'var(--amber)'
     );
@@ -765,7 +830,7 @@ function primeLocalOcrIfNeeded(force){
   // real internet behind it) and was previously causing this to silently
   // never even attempt priming. Just try; the fetch itself will fail fast
   // and cleanly if there's genuinely no connection.
-  setLocalOcrNote('⏳ Downloading offline OCR engine… please keep this device online for ~15–30 seconds.', 'var(--blue-bg)', 'var(--blue)');
+  setLocalOcrNote('⏳ Downloading offline OCR engine (~30MB)… please keep this device on good WiFi for 1–2 minutes.', 'var(--blue-bg)', 'var(--blue)');
   ensurePaddleOcrReady()
     .then(() => {
       try{ localStorage.setItem(LOCAL_OCR_PRIMED_KEY, '1'); }catch(e){}
