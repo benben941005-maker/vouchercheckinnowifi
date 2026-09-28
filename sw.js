@@ -4,8 +4,8 @@
 // opened at least once before while online (which installs this cache).
 // Firebase sync still genuinely needs a live connection, but name-card
 // scanning now has a local (in-browser) fallback via PaddleOCR
-// (@paddlejs-models/ocr) for when Google Vision can't be reached — see the
-// "cache everything except live API calls" fetch handling below — so staff
+// (ppu-paddle-ocr, PP-OCRv6) for when Google Vision can't be reached — see
+// the "cache everything except live API calls" fetch handling below — so staff
 // can keep scanning (with lower accuracy) instead of only being able to
 // fall back to manual name entry + signature + check-in/out (which already
 // has its own offline-sync fallback built into the app).
@@ -13,7 +13,19 @@
 // Bump CACHE_NAME whenever you want to force everyone's cached copy to
 // refresh (e.g. after a meaningful update to index.html) — the old cache is
 // deleted automatically on the next activate.
-const CACHE_NAME = 'voucher-checkin-v7';
+//
+// v8: local_checkin.html and scan_station.html swapped their offline OCR
+// engine from @paddlejs-models/ocr (PP-OCRv2) to ppu-paddle-ocr (PP-OCRv6,
+// loaded via a dynamic import() + import map instead of a classic script
+// tag) — the old engine's CDN URL below is removed and replaced with the
+// new engine's module + import-map URLs, and bumping the version here makes
+// every device drop its old cached OCR script/model files and re-download
+// the new ones next time it's online. Note: the new engine's model/weight
+// files (fetched internally by the module itself, not listed by name here)
+// still get cached automatically by the catch-all handler below the first
+// time each device downloads them, same as the old engine did — nothing
+// else about that "cache once, offline forever" mechanism changed.
+const CACHE_NAME = 'voucher-checkin-v8';
 
 // This one service worker now covers FOUR separate pages in this repo:
 // index.html (phone check-in counter), scan_station.html (computer scan
@@ -34,7 +46,9 @@ const APP_SHELL_URLS = [
   'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
   'https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js',
   'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js',
-  'https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.2.4/lib/index.js',
+  'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.bundle.min.mjs',
+  'https://cdn.jsdelivr.net/npm/ppu-ocv@4.0.0/index.canvas-web.js',
+  'https://cdn.jsdelivr.net/npm/ppu-paddle-ocr@6.6.0/web/index.js',
   'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
   'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js'
 ];
