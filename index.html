@@ -174,8 +174,12 @@
   <div class="card" id="confirmCard" style="display:none;">
     <h2>2. Confirm Details</h2>
     <div class="field">
-      <label for="nameInput">Name</label>
-      <input type="text" id="nameInput" placeholder="Edit if OCR got it wrong">
+      <label for="chineseNameInput">Chinese Name 中文姓名</label>
+      <input type="text" id="chineseNameInput" placeholder="Edit if OCR got it wrong / 如OCR有误请修改">
+    </div>
+    <div class="field">
+      <label for="englishNameInput">English Name 英文姓名</label>
+      <input type="text" id="englishNameInput" placeholder="Edit if OCR got it wrong">
     </div>
     <div class="field">
       <label for="companyInput">Company / Organization</label>
@@ -268,6 +272,14 @@ function escapeHtml(s){
 function normalize(name){
   return name.replace(/\s+/g,'').toLowerCase();
 }
+function combineNames(chineseName, englishName){
+  if(chineseName && englishName) return chineseName + ' (' + englishName + ')';
+  return chineseName || englishName || '';
+}
+function displayName(entry){
+  if(!entry) return '';
+  return combineNames(entry.chineseName, entry.englishName) || entry.name || '';
+}
 function showBanner(type, text){
   const b = $('resultBanner');
   b.className = 'banner ' + type;
@@ -300,7 +312,12 @@ function dateKeyFromMs(ms){
 
 // --- Everything below is stored ONLY in this browser's local storage — no
 // server, no sync, nothing shared with any other device. ---
-const STORAGE_KEY = 'localCheckinData_v1';
+// Bumped to v2: check-in records now store separate chineseName/englishName
+// fields instead of one combined `name` field, so old locally-cached data on
+// this device under the previous key is deliberately left behind rather than
+// mixed in under the new schema. Export to Excel first if you still need any
+// records under the old key.
+const STORAGE_KEY = 'localCheckinData_v2';
 let entries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
 function saveEntries(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(entries)); }
 function todayEntries(){
@@ -411,30 +428,38 @@ $('importRegFile').addEventListener('change', e => {
 // that fails, fall back to a fuzzy (edit-distance) match — but only when
 // it's unambiguous, and always flagged for staff to actually confirm
 // rather than auto-trusted like an exact match.
-function findRegistrationMatch(name){
-  const norm = normalize(name);
-  if(!norm) return null;
+function findRegistrationMatch(chineseName, englishName){
+  const normZh = normalize(chineseName || '');
+  const normEn = normalize(englishName || '');
+  if(!normZh && !normEn) return null;
+
   const exact = registrations.find(r =>
-    (r.chineseName && normalize(r.chineseName) === norm) ||
-    (r.englishName && normalize(r.englishName) === norm)
+    (normZh && r.chineseName && normalize(r.chineseName) === normZh) ||
+    (normEn && r.englishName && normalize(r.englishName) === normEn)
   );
   if(exact) return { match: exact, fuzzy: false };
-  if(norm.length < 2) return null;
-  const maxDist = norm.length <= 4 ? 1 : 2;
+
+  // Fuzzy fallback: each name variant is only compared against the SAME
+  // variant in the registration list (a Chinese name typo is only compared
+  // against other Chinese names, and likewise for English) — a Chinese and
+  // an English string in different scripts would never land at a close edit
+  // distance anyway.
   let best = null, bestDist = Infinity, tie = false;
-  registrations.forEach(r => {
-    [r.chineseName, r.englishName].forEach(candidate => {
-      if(!candidate) return;
-      const cnorm = normalize(candidate);
-      if(!cnorm || Math.abs(cnorm.length - norm.length) > maxDist) return;
-      const d = levenshtein(cnorm, norm);
-      if(d < bestDist){ bestDist = d; best = r; tie = false; }
-      else if(d === bestDist && best !== r){ tie = true; }
-    });
-  });
-  if(best && bestDist > 0 && bestDist <= maxDist && !tie){
-    return { match: best, fuzzy: true };
+  function consider(norm, candidate, r){
+    if(!norm || norm.length < 2 || !candidate) return;
+    const maxDist = norm.length <= 4 ? 1 : 2;
+    const cnorm = normalize(candidate);
+    if(!cnorm || Math.abs(cnorm.length - norm.length) > maxDist) return;
+    const d = levenshtein(cnorm, norm);
+    if(d === 0 || d > maxDist) return;
+    if(d < bestDist){ bestDist = d; best = r; tie = false; }
+    else if(d === bestDist && best !== r){ tie = true; }
   }
+  registrations.forEach(r => {
+    consider(normZh, r.chineseName, r);
+    consider(normEn, r.englishName, r);
+  });
+  if(best && !tie) return { match: best, fuzzy: true };
   return null;
 }
 
@@ -442,6 +467,8 @@ function applyRegistrationMatch(result){
   const note = $('registrationMatchNote');
   const companyInput = $('companyInput');
   const mobileInput = $('mobileInput');
+  const chineseNameInput = $('chineseNameInput');
+  const englishNameInput = $('englishNameInput');
   if(!result){
     note.className = '';
     note.style.display = 'block';
@@ -455,6 +482,14 @@ function applyRegistrationMatch(result){
   const match = result.match;
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
+  // Only fill in a field if the user hasn't already typed something into it —
+  // never silently overwrite a manual correction. This also bridges a card
+  // scan that only picked up ONE of the two printed names: once matched to a
+  // registration, BOTH names get filled in from that single registration
+  // record, so a later scan/check-out that only captures the OTHER name
+  // variant still resolves to the same person.
+  if(!chineseNameInput.value.trim() && match.chineseName) chineseNameInput.value = match.chineseName;
+  if(!englishNameInput.value.trim() && match.englishName) englishNameInput.value = match.englishName;
   if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
   if(!mobileInput.value.trim() && match.mobile) mobileInput.value = match.mobile;
   const parts = [];
@@ -464,18 +499,21 @@ function applyRegistrationMatch(result){
   if(match.mobile) parts.push(match.mobile);
   note.style.display = 'block';
   if(result.fuzzy){
-    const correctName = match.chineseName || match.englishName || '';
     note.style.color = 'var(--amber)';
     note.style.background = 'var(--amber-bg)';
     note.innerHTML = '⚠ Possible match (scanned name may have a misread character) — please confirm' +
       (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '') +
-      (correctName ? ' <button type="button" id="useFuzzyNameBtn" style="margin-left:6px;padding:2px 8px;border-radius:6px;border:1px solid var(--amber);background:#fff;color:var(--amber);cursor:pointer;font-size:12px;">Use this name</button>' : '');
+      ' <button type="button" id="useFuzzyNameBtn" style="margin-left:6px;padding:2px 8px;border-radius:6px;border:1px solid var(--amber);background:#fff;color:var(--amber);cursor:pointer;font-size:12px;">Use this name</button>';
     const btn = $('useFuzzyNameBtn');
     if(btn){
       btn.addEventListener('click', () => {
-        $('nameInput').value = correctName;
-        checkSimilar(correctName);
-        autoFillFromName(correctName);
+        // Overwrite BOTH fields with the registration's canonical spelling —
+        // this button means "trust the registration record", not just patch
+        // whichever field triggered the fuzzy match.
+        $('chineseNameInput').value = match.chineseName || '';
+        $('englishNameInput').value = match.englishName || '';
+        checkSimilar(match.chineseName, match.englishName);
+        autoFillFromNames(match.chineseName, match.englishName);
       });
     }
   } else {
@@ -485,35 +523,66 @@ function applyRegistrationMatch(result){
   }
 }
 
-function findExistingEntry(name){
-  const norm = normalize(name);
-  if(!norm) return null;
-  return todayEntries().find(e => normalize(e.name) === norm) || null;
+function findExistingEntry(chineseName, englishName){
+  const normZh = normalize(chineseName || '');
+  const normEn = normalize(englishName || '');
+  if(!normZh && !normEn) return null;
+  // Matches on EITHER name variant — catches the case where this person was
+  // scanned/typed with one name at check-in and the other name (e.g. OCR
+  // picked up a different line this time) at check-out.
+  return todayEntries().find(e =>
+    (normZh && e.chineseName && normalize(e.chineseName) === normZh) ||
+    (normEn && e.englishName && normalize(e.englishName) === normEn)
+  ) || null;
 }
 function applyExistingEntry(existing){
   const note = $('registrationMatchNote');
   const companyInput = $('companyInput');
   const mobileInput = $('mobileInput');
+  const chineseNameInput = $('chineseNameInput');
+  const englishNameInput = $('englishNameInput');
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
+  if(!chineseNameInput.value.trim() && existing.chineseName) chineseNameInput.value = existing.chineseName;
+  if(!englishNameInput.value.trim() && existing.englishName) englishNameInput.value = existing.englishName;
   if(!companyInput.value.trim() && existing.company) companyInput.value = existing.company;
   if(!mobileInput.value.trim() && existing.mobile) mobileInput.value = existing.mobile;
   note.style.display = 'block';
   note.style.color = 'var(--blue)';
   note.style.background = 'var(--blue-bg)';
   note.innerHTML = '↩ Already checked in at ' + escapeHtml(fmtTime(existing.checkInAtMs)) +
-    ' — Organization/Mobile No. copied from that check-in record.' +
+    ' — Name/Organization/Mobile No. copied from that check-in record.' +
     (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '');
 }
-function autoFillFromName(name){
-  const existing = findExistingEntry(name);
-  if(existing){ applyExistingEntry(existing); return; }
-  applyRegistrationMatch(findRegistrationMatch(name));
+// Single entry point used whenever either name field changes (after a scan
+// or manual edit). Registration match runs FIRST (backfilling both name
+// fields from a single registration record when found), THEN the existing-
+// today's-entry lookup runs against the now-possibly-completed pair — see
+// the identical pattern (and rationale) in voucher_checkin.html.
+function autoFillFromNames(chineseName, englishName){
+  const registrationMatch = findRegistrationMatch(chineseName, englishName);
+  if(registrationMatch){
+    applyRegistrationMatch(registrationMatch);
+  }
+  const zh = $('chineseNameInput').value.trim();
+  const en = $('englishNameInput').value.trim();
+  const existing = findExistingEntry(zh, en);
+  if(existing){
+    applyExistingEntry(existing);
+    return;
+  }
+  if(!registrationMatch){
+    applyRegistrationMatch(null);
+  }
 }
-$('nameInput').addEventListener('input', e => {
-  checkSimilar(e.target.value);
-  autoFillFromName(e.target.value);
-});
+function onNameFieldInput(){
+  const zh = $('chineseNameInput').value;
+  const en = $('englishNameInput').value;
+  checkSimilar(zh, en);
+  autoFillFromNames(zh, en);
+}
+$('chineseNameInput').addEventListener('input', onNameFieldInput);
+$('englishNameInput').addEventListener('input', onNameFieldInput);
 
 function levenshtein(a,b){
   const m=a.length, n=b.length;
@@ -526,15 +595,27 @@ function levenshtein(a,b){
   }
   return dp[m][n];
 }
-function checkSimilar(name){
-  const norm = normalize(name);
-  if(!norm || norm.length < 2){ $('similarWarning').innerHTML = ''; return; }
+function checkSimilar(chineseName, englishName){
+  const normZh = normalize(chineseName || '');
+  const normEn = normalize(englishName || '');
+  if((!normZh || normZh.length < 2) && (!normEn || normEn.length < 2)){ $('similarWarning').innerHTML = ''; return; }
+  // Each name variant is only compared against the SAME variant on existing
+  // records — cross-variant matching is already handled as an exact-match
+  // duplicate by findExistingEntry/autoFillFromNames, not a "similar, please
+  // double check" warning.
   const near = todayEntries().find(e => {
-    const en = normalize(e.name);
-    return en !== norm && levenshtein(en, norm) <= 1;
+    if(normZh && normZh.length >= 2 && e.chineseName){
+      const ezh = normalize(e.chineseName);
+      if(ezh !== normZh && levenshtein(ezh, normZh) <= 1) return true;
+    }
+    if(normEn && normEn.length >= 2 && e.englishName){
+      const een = normalize(e.englishName);
+      if(een !== normEn && levenshtein(een, normEn) <= 1) return true;
+    }
+    return false;
   });
   if(near){
-    $('similarWarning').innerHTML = `<div class="banner warn">Note: a similar name "${escapeHtml(near.name)}" was already checked in today. Please verify this isn't the same person.</div>`;
+    $('similarWarning').innerHTML = `<div class="banner warn">Note: a similar name "${escapeHtml(displayName(near))}" was already checked in today. Please verify this isn't the same person.</div>`;
   } else {
     $('similarWarning').innerHTML = '';
   }
@@ -692,35 +773,38 @@ async function runOcr(dataUrl){
   }
 
   if(rawText !== null){
-    const name = guessName(rawText);
+    const names = guessNames(rawText);
     $('rawText').textContent = rawText || '(no response)';
     $('rawTextWrap').style.display = rawText ? 'block' : 'none';
-    $('ocrStatus').textContent = name ? 'Scan complete. Please confirm the name below.' : 'Could not read a name clearly — please type it manually.';
-    $('nameInput').value = name;
+    $('ocrStatus').textContent = (names.chineseName || names.englishName) ? 'Scan complete. Please confirm the name(s) below.' : 'Could not read a name clearly — please type it manually.';
+    $('chineseNameInput').value = names.chineseName;
+    $('englishNameInput').value = names.englishName;
     $('companyInput').value = '';
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
-    checkSimilar(name);
-    autoFillFromName(name);
+    checkSimilar(names.chineseName, names.englishName);
+    autoFillFromNames(names.chineseName, names.englishName);
     return;
   }
 
   $('ocrStatus').textContent = 'Google Vision unavailable (' + visionErr.message + ') — trying local offline recognition…';
   try{
     const localText = await localOcrRecognize(dataUrl);
-    const name = guessName(localText);
+    const names = guessNames(localText);
     $('rawText').textContent = localText || '(no response)';
     $('rawTextWrap').style.display = localText ? 'block' : 'none';
-    $('ocrStatus').innerHTML = '<span style="color:var(--amber);">⚠ Used local offline recognition (lower accuracy than usual) — please double-check the name below.</span>';
-    $('nameInput').value = name;
+    $('ocrStatus').innerHTML = '<span style="color:var(--amber);">⚠ Used local offline recognition (lower accuracy than usual) — please double-check the name(s) below.</span>';
+    $('chineseNameInput').value = names.chineseName;
+    $('englishNameInput').value = names.englishName;
     $('companyInput').value = '';
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
-    checkSimilar(name);
-    autoFillFromName(name);
+    checkSimilar(names.chineseName, names.englishName);
+    autoFillFromNames(names.chineseName, names.englishName);
   }catch(localErr){
     $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(visionErr.message) + '. Please type the name manually.</span>';
-    $('nameInput').value = '';
+    $('chineseNameInput').value = '';
+    $('englishNameInput').value = '';
     $('companyInput').value = '';
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
@@ -731,8 +815,12 @@ async function runOcr(dataUrl){
 const COMPANY_HINTS = /(pte\.?\s*ltd|pty\.?\s*ltd|\bltd\.?\b|\bllc\b|\bllp\b|\binc\.?\b|\bcorp\.?\b|company|\bco\.?\b|group|holdings|enterprise|centre|center|clinic|hospital|pharmacy|association|society|institute|foundation|有限公司|股份公司|公司|集团|药行|药业|药局|诊所|医院|中心|协会|学会|基金会)/i;
 const TITLE_HINTS = /(manager|director|president|chairman|founder|\bceo\b|\bcfo\b|\bcoo\b|executive|consultant|specialist|physician|doctor|\bdr\.?\b|\bprof\.?\b|professor|经理|总监|董事|总裁|主任|医师|医生|教授|顾问|负责人|marketing|officer)/i;
 const CONTACT_HINTS = /(@|https?:\/\/|www\.|电话|手机|传真|邮箱|email|tel:|fax:|address|地址)/i;
-function guessName(rawText){
-  if(!rawText) return '';
+// Most cards for this event print BOTH a Chinese name line AND an English
+// name line for the same person, so this looks for each shape independently
+// in one pass over the OCR text instead of returning only whichever comes
+// first — that's what lets a single scan fill in both name fields at once.
+function guessNames(rawText){
+  if(!rawText) return { chineseName: '', englishName: '' };
   const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
   const candidates = [];
   for(const line of lines){
@@ -742,11 +830,42 @@ function guessName(rawText){
     if(/\d/.test(line)) continue;
     candidates.push(line);
   }
-  const chineseName = candidates.find(l => /^[一-鿿·]{2,4}$/.test(l));
-  if(chineseName) return chineseName;
-  const englishName = candidates.find(l => /^[A-Za-z][A-Za-z.\-' ]{1,40}$/.test(l) && l.split(/\s+/).length <= 4);
-  if(englishName) return englishName;
-  return candidates[0] || lines[0] || '';
+  let chineseName = candidates.find(l => /^[一-鿿·]{2,4}$/.test(l)) || '';
+  let englishName = candidates.find(l => /^[A-Za-z][A-Za-z.\-' ]{1,40}$/.test(l) && l.split(/\s+/).length <= 4) || '';
+
+  // The two strict whole-line checks above only match when a name has its
+  // OWN clean line. Some cards print both names together on one line (e.g.
+  // "Zhang San 张三"), or OCR inserts a stray space inside a Chinese name
+  // (e.g. "张 三") — either way that line matches NEITHER strict pattern,
+  // and previously, as soon as ONE field was found on some other line, the
+  // function returned immediately and never tried to recover the other —
+  // so capturing the English name could silently drop the Chinese one.
+  // Fix: whichever field is still missing gets an independent second look —
+  // an embedded run of that script inside any surviving line.
+  if(!chineseName){
+    for(const line of candidates){
+      const m = line.replace(/\s+/g, '').match(/[一-鿿]{2,6}/);
+      if(m){ chineseName = m[0]; break; }
+    }
+  }
+  if(!englishName){
+    for(const line of candidates){
+      const m = line.match(/[A-Za-z][A-Za-z.\-']{1,30}(?:\s+[A-Za-z][A-Za-z.\-']{1,30}){0,3}/);
+      if(m){ englishName = m[0].trim(); break; }
+    }
+  }
+
+  if(chineseName || englishName) return { chineseName, englishName };
+  const fallback = candidates[0] || lines[0] || '';
+  return classifyScannedName(fallback);
+}
+
+// Buckets a single already-guessed name string into whichever of the two
+// fields it looks like it belongs in (used by guessNames()'s fallback above).
+function classifyScannedName(text){
+  const t = (text || '').trim();
+  if(!t) return { chineseName: '', englishName: '' };
+  return /[一-鿿]/.test(t) ? { chineseName: t, englishName: '' } : { chineseName: '', englishName: t };
 }
 
 // --- Local (in-browser) OCR — identical to the other two apps. ---
@@ -1140,9 +1259,10 @@ function closeQrHandoff(){
 }
 $('qrHandoffCancelBtn').addEventListener('click', closeQrHandoff);
 $('qrSignBtn').addEventListener('click', () => {
-  const name = $('nameInput').value.trim();
-  if(!name){ alert('Please enter a name first.'); return; }
-  openQrHandoff(name, $('companyInput').value.trim(), $('mobileInput').value.trim());
+  const chineseName = $('chineseNameInput').value.trim();
+  const englishName = $('englishNameInput').value.trim();
+  if(!chineseName && !englishName){ alert('Please enter a name first.'); return; }
+  openQrHandoff(combineNames(chineseName, englishName), $('companyInput').value.trim(), $('mobileInput').value.trim());
 });
 $('qrScanBackBtn').addEventListener('click', () => {
   $('qrHandoffStep1').style.display = 'none';
@@ -1229,13 +1349,18 @@ function playErrorTone(){
   }catch(e){}
 }
 
+function generateLocalEntryId(){
+  return todayEventId() + '__local__' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
 $('checkinActionBtn').addEventListener('click', () => {
-  const name = $('nameInput').value.trim();
+  const chineseName = $('chineseNameInput').value.trim();
+  const englishName = $('englishNameInput').value.trim();
   const company = $('companyInput').value.trim();
   const mobile = $('mobileInput').value.trim();
-  if(!name){ alert('Please enter a name before checking in.'); return; }
+  if(!chineseName && !englishName){ alert('Please enter at least one of Chinese Name / English Name before checking in.'); return; }
 
-  const registrationMatch = findRegistrationMatch(name);
+  const registrationMatch = findRegistrationMatch(chineseName, englishName);
   if(!registrationMatch && !mobile){
     alert('No matching conference registration found for this name. Please type in the Mobile No. manually before checking in.');
     $('mobileInput').focus();
@@ -1246,10 +1371,9 @@ $('checkinActionBtn').addEventListener('click', () => {
 
   getAudioCtx();
 
-  const norm = normalize(name);
-  const existing = todayEntries().find(e => normalize(e.name) === norm);
+  const existing = findExistingEntry(chineseName, englishName);
   if(existing){
-    showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
+    showBanner('dup', `⚠ DUPLICATE — ${combineNames(chineseName, englishName)} already checked in at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
     playErrorTone();
     resetCaptureUi();
     return;
@@ -1257,7 +1381,7 @@ $('checkinActionBtn').addEventListener('click', () => {
 
   const nowMs = Date.now();
   entries.push({
-    id: todayEventId() + '__' + norm, name, company,
+    id: generateLocalEntryId(), chineseName: chineseName || '', englishName: englishName || '', company,
     checkInAtMs: nowMs, checkOutAtMs: null,
     checkInSignature: signature, checkOutSignature: null,
     mobile: mobile || '',
@@ -1265,7 +1389,7 @@ $('checkinActionBtn').addEventListener('click', () => {
     physicianNo: (registrationMatch && registrationMatch.physicianNo) || '',
     registrationMatched: !!registrationMatch
   });
-  showBanner('ok', `✓ ${name} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`);
+  showBanner('ok', `✓ ${combineNames(chineseName, englishName)} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`);
   playSuccessTone();
   saveEntries();
   renderTable();
@@ -1273,28 +1397,32 @@ $('checkinActionBtn').addEventListener('click', () => {
 });
 
 $('checkoutActionBtn').addEventListener('click', () => {
-  const name = $('nameInput').value.trim();
-  if(!name){ alert('Please enter a name before checking out.'); return; }
+  const chineseName = $('chineseNameInput').value.trim();
+  const englishName = $('englishNameInput').value.trim();
+  if(!chineseName && !englishName){ alert('Please enter at least one of Chinese Name / English Name before checking out.'); return; }
   const signature = getSignatureDataUrl();
   if(!signature){ alert('Please have the guest sign before checking out.'); return; }
 
   getAudioCtx();
-  const norm = normalize(name);
-  const existing = todayEntries().find(e => normalize(e.name) === norm);
+  const existing = findExistingEntry(chineseName, englishName);
   if(!existing){
-    showBanner('warn', `⚠ No check-in found for ${name} today — check them in first.`);
+    showBanner('warn', `⚠ No check-in found for ${combineNames(chineseName, englishName)} today — check them in first.`);
     playErrorTone();
     return;
   }
   if(existing.checkOutAtMs){
-    showBanner('dup', `⚠ ${name} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
+    showBanner('dup', `⚠ ${displayName(existing)} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
     playErrorTone();
     resetCaptureUi();
     return;
   }
   existing.checkOutAtMs = Date.now();
   existing.checkOutSignature = signature;
-  showBanner('ok', `✓ ${name} checked out at ${fmtTime(existing.checkOutAtMs)}.`);
+  // Backfill whichever name field this checkout scan captured that the
+  // original check-in didn't — same reasoning as the registration-match path.
+  if(chineseName && !existing.chineseName) existing.chineseName = chineseName;
+  if(englishName && !existing.englishName) existing.englishName = englishName;
+  showBanner('ok', `✓ ${displayName(existing)} checked out at ${fmtTime(existing.checkOutAtMs)}.`);
   playSuccessTone();
   saveEntries();
   renderTable();
@@ -1311,14 +1439,18 @@ function renderTable(){
     const statusBadge = e.checkOutAtMs
       ? '<span class="status-badge status-out">Checked Out</span>'
       : '<span class="status-badge status-in">Checked In</span>';
+    const label = escapeHtml(displayName(e));
     const sigIn = e.checkInSignature
-      ? `<img class="sig-thumb" data-sig-label="Check-in signature — ${escapeHtml(e.name)}" src="${e.checkInSignature}">`
+      ? `<img class="sig-thumb" data-sig-label="Check-in signature — ${label}" src="${e.checkInSignature}">`
       : '<span class="muted-dash">—</span>';
     const sigOut = e.checkOutSignature
-      ? `<img class="sig-thumb" data-sig-label="Check-out signature — ${escapeHtml(e.name)}" src="${e.checkOutSignature}">`
+      ? `<img class="sig-thumb" data-sig-label="Check-out signature — ${label}" src="${e.checkOutSignature}">`
       : '<span class="muted-dash">—</span>';
+    const nameCell = e.chineseName && e.englishName
+      ? `${escapeHtml(e.chineseName)}<br><span style="color:var(--muted);font-size:11px;">${escapeHtml(e.englishName)}</span>`
+      : escapeHtml(e.chineseName || e.englishName || e.name || '');
     return `<tr>
-      <td>${escapeHtml(e.name)}</td>
+      <td>${nameCell}</td>
       <td>${escapeHtml(e.company||'')}</td>
       <td>${fmtTime(e.checkInAtMs)}</td>
       <td>${fmtTime(e.checkOutAtMs)}</td>
@@ -1358,10 +1490,10 @@ $('exportBtn').addEventListener('click', async () => {
   try{
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Check-Ins');
-    sheet.addRow(['Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature']);
+    sheet.addRow(['Chinese Name','English Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature']);
     sheet.getRow(1).font = { bold: true };
     sheet.columns = [
-      { width: 20 }, { width: 20 }, { width: 16 },
+      { width: 18 }, { width: 20 }, { width: 20 }, { width: 16 },
       { width: 22 }, { width: 18 }, { width: 22 }, { width: 20 }, { width: 20 },
       { width: 14 }, { width: 20 }, { width: 20 }
     ];
@@ -1370,7 +1502,7 @@ $('exportBtn').addEventListener('click', async () => {
       const matched = !!e.registrationMatched;
       const statusText = e.checkOutAtMs ? 'Checked Out' : 'Checked In';
       sheet.addRow([
-        e.name, e.company || '', e.mobile || '', e.email || '', e.physicianNo || '',
+        e.chineseName || '', e.englishName || '', e.company || '', e.mobile || '', e.email || '', e.physicianNo || '',
         matched ? 'Matched' : 'No Match — Verify',
         e.checkInAtMs ? new Date(e.checkInAtMs).toLocaleString() : '',
         e.checkOutAtMs ? new Date(e.checkOutAtMs).toLocaleString() : '',
@@ -1378,19 +1510,19 @@ $('exportBtn').addEventListener('click', async () => {
       ]);
       sheet.getRow(rowIndex).height = 50;
       if(!matched){
-        const matchCell = sheet.getRow(rowIndex).getCell(6);
+        const matchCell = sheet.getRow(rowIndex).getCell(7);
         matchCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE8E6' } };
         matchCell.font = { color: { argb: 'FFC5221F' }, bold: true };
       }
       const sigIn = dataUrlToBase64AndExt(e.checkInSignature);
       if(sigIn){
         const imgId = workbook.addImage({ base64: sigIn.base64, extension: sigIn.extension });
-        sheet.addImage(imgId, { tl: { col: 9.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
       const sigOut = dataUrlToBase64AndExt(e.checkOutSignature);
       if(sigOut){
         const imgId = workbook.addImage({ base64: sigOut.base64, extension: sigOut.extension });
-        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 11.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
     });
     const buffer = await workbook.xlsx.writeBuffer();
