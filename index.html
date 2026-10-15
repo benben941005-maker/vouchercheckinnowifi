@@ -23,8 +23,12 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <!-- Local, in-browser OCR — ppu-paddle-ocr (PP-OCRv6 models via ONNX
-     Runtime Web), used ONLY as a fallback when Google Vision can't be
-     reached (no network). Replaces the earlier @paddlejs-models/ocr engine:
+     Runtime Web). This is the ONLY scanning engine on this page — there is
+     no Google Vision call here at all, since this page is explicitly for a
+     computer with no network. The model downloads once while this device
+     does have a connection (see primeLocalOcrIfNeeded()/the "Prepare now"
+     button), then recognition runs fully offline afterwards. Replaces the
+     earlier @paddlejs-models/ocr engine:
      that one's character set was missing some less-common Chinese
      characters entirely (confirmed: 沄, 媺) and often confused others
      (吴 → 昊) — this one's dictionary is much larger (~6,900+ characters
@@ -135,14 +139,15 @@
   </div>
 
   <div class="card">
-    <details class="settings-bar" id="settingsDetails">
-      <summary>⚙ Google Vision API Key (optional — only used if this computer does have a connection)</summary>
-      <div class="key-row">
-        <input type="text" id="apiKeyInput" placeholder="Paste your Google Cloud Vision API key">
-        <button class="btn-secondary" id="saveKeyBtn" style="width:auto;">Save</button>
-      </div>
-      <div id="apiKeyStatus" style="margin-top:6px;"></div>
-    </details>
+    <h2>Or: Key in Registration No.</h2>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+      If the registration list above has been imported, just type the person's registration number (the "No. 序号" column from the registration export) here — their details fill in below instantly, no scanning needed.
+    </div>
+    <div class="btn-row">
+      <input type="text" id="regNoInput" inputmode="numeric" placeholder="e.g. 9" style="flex:1;">
+      <button class="btn-primary" id="regNoLookupBtn" style="width:auto;">🔍 Find</button>
+    </div>
+    <div id="regNoLookupStatus" style="font-size:12px;margin-top:8px;"></div>
   </div>
 
   <div class="card">
@@ -328,7 +333,11 @@ function todayEntries(){
 // --- Imported conference registration list (from an Excel/CSV file, not
 // Firebase) — used only to auto-fill Organization/Mobile No. and flag
 // unmatched names, exactly like the online apps do against Firestore. ---
-const IMPORTED_REGISTRATIONS_KEY = 'importedRegistrations_v1';
+// Bumped to v2: parseRegistrationRows() now also captures the "No. 序号"
+// column (for the key-in-a-number quick lookup below), which a list
+// imported under v1 never has — re-importing the same Excel file (no
+// changes needed to it) picks up the No. column under the new key.
+const IMPORTED_REGISTRATIONS_KEY = 'importedRegistrations_v2';
 let registrations = JSON.parse(localStorage.getItem(IMPORTED_REGISTRATIONS_KEY) || '[]');
 
 function refreshRegistrationImportUi(){
@@ -364,6 +373,13 @@ function parseRegistrationRows(rows){
   if(!rows || !rows.length) return [];
   const headers = rows[0];
   const col = {
+    // '序号' alone is a safe, unique anchor for the registration No. column —
+    // unlike the English word "no.", it never accidentally matches "Mobile
+    // No." or "Physician Reg. Certificate No." (both of which also contain
+    // "no."), so no exclude list is needed for the Chinese pattern. The
+    // exclude list below only guards the English "no." pattern, kept as a
+    // fallback for a sheet exported without the Chinese label.
+    no: findColumnIndex(headers, ['序号', 'no.'], ['mobile', 'physician', 'paynow']),
     chineseName: findColumnIndex(headers, ['chinese name', '中文姓名']),
     englishName: findColumnIndex(headers, ['english name', '英文名字']),
     organization: findColumnIndex(headers, ['organization', '单位']),
@@ -377,6 +393,7 @@ function parseRegistrationRows(rows){
     const row = rows[r];
     if(!row || !row.length) continue;
     const entry = {
+      no: get(row, col.no),
       chineseName: get(row, col.chineseName),
       englishName: get(row, col.englishName),
       organization: get(row, col.organization),
@@ -584,6 +601,42 @@ function onNameFieldInput(){
 $('chineseNameInput').addEventListener('input', onNameFieldInput);
 $('englishNameInput').addEventListener('input', onNameFieldInput);
 
+// Quick lookup by the imported registration list's own serial number ("No.
+// 序号" column), as an alternative to scanning/typing a name — useful when
+// the person's ticket/badge already prints that number. Reuses the exact
+// same fill-in path a name match takes (onNameFieldInput →
+// autoFillFromNames → applyRegistrationMatch/findExistingEntry) by just
+// setting the name fields from the matched record and firing that same
+// handler, so "already checked in today" detection etc. all still apply.
+function doRegNoLookup(){
+  const status = $('regNoLookupStatus');
+  const val = $('regNoInput').value.trim();
+  if(!val){ status.textContent = ''; return; }
+  if(!registrations.length){
+    status.innerHTML = '<span style="color:var(--amber);">⚠ No registration list imported yet — import it above first.</span>';
+    return;
+  }
+  const reg = registrations.find(r => String(r.no || '').trim() === val);
+  if(!reg){
+    status.innerHTML = '<span style="color:var(--red);">✗ No registrant found with No. ' + escapeHtml(val) + '.</span>';
+    return;
+  }
+  status.innerHTML = '<span style="color:var(--green);">✓ Found ' + escapeHtml(combineNames(reg.chineseName, reg.englishName)) + ' — details filled in below.</span>';
+  $('preview').style.display = 'none';
+  $('rawTextWrap').style.display = 'none';
+  $('ocrStatus').textContent = '';
+  $('chineseNameInput').value = reg.chineseName || '';
+  $('englishNameInput').value = reg.englishName || '';
+  $('companyInput').value = '';
+  $('mobileInput').value = '';
+  $('confirmCard').style.display = 'block';
+  onNameFieldInput();
+}
+$('regNoLookupBtn').addEventListener('click', doRegNoLookup);
+$('regNoInput').addEventListener('keydown', e => {
+  if(e.key === 'Enter'){ e.preventDefault(); doRegNoLookup(); }
+});
+
 function levenshtein(a,b){
   const m=a.length, n=b.length;
   const dp = Array.from({length:m+1},(_,i)=>[i,...Array(n).fill(0)]);
@@ -620,30 +673,6 @@ function checkSimilar(chineseName, englishName){
     $('similarWarning').innerHTML = '';
   }
 }
-
-// --- Google Vision API key (optional) ---
-const API_KEY_STORAGE = 'gcvApiKey_v1';
-function getApiKey(){ return localStorage.getItem(API_KEY_STORAGE) || ''; }
-function refreshKeyUi(){
-  const key = getApiKey();
-  const details = $('settingsDetails');
-  const status = $('apiKeyStatus');
-  if(key){
-    $('apiKeyInput').value = key;
-    details.className = 'settings-bar set';
-    status.textContent = 'Saved. Will be tried first if this computer has a connection at scan time.';
-  } else {
-    details.className = 'settings-bar';
-    status.textContent = 'Not set — every scan will go straight to local offline recognition.';
-  }
-}
-$('saveKeyBtn').addEventListener('click', () => {
-  const val = $('apiKeyInput').value.trim();
-  if(!val){ alert('Please paste a valid API key.'); return; }
-  localStorage.setItem(API_KEY_STORAGE, val);
-  refreshKeyUi();
-});
-refreshKeyUi();
 
 // Tries hardest to get the BACK/outward camera first, since that's what
 // you point at a name card or a screen. "ideal" alone is only a soft hint
@@ -738,44 +767,22 @@ function handleUploadedFile(file){
   reader.readAsDataURL(file);
 }
 
-// --- OCR: Google Vision first (only if a key is saved AND this computer
-// happens to have a connection right now), local PaddleOCR fallback
-// otherwise — identical logic/engine to the other two apps in this project.
+// --- OCR: local PaddleOCR only. ---
+// This page is explicitly for a computer with NO network, so there is no
+// point even attempting a Google Vision call before falling back — that
+// used to happen on every single scan (since no API key is ever set here),
+// wasting time waiting on a network request that can't succeed, AND it hid
+// the real local-OCR error from the user: if local recognition then also
+// failed, the message shown was always the leftover "No Google Vision API
+// key set on this device" text, never the actual reason local OCR failed.
+// Now it goes straight to local OCR and surfaces THAT error if it fails.
 async function runOcr(dataUrl){
-  $('ocrStatus').textContent = 'Reading name card…';
-
-  let rawText = null;
-  let visionErr = null;
-  const apiKey = getApiKey();
-  if(!apiKey){
-    visionErr = new Error('No Google Vision API key set on this device');
-  }else{
-    try{
-      const base64 = dataUrl.split(',')[1];
-      const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          requests: [{
-            image: { content: base64 },
-            features: [{ type: 'TEXT_DETECTION' }],
-            imageContext: { languageHints: ['zh-Hant', 'zh', 'en'] }
-          }]
-        })
-      });
-      const data = await resp.json();
-      const result = data.responses && data.responses[0];
-      if(result && result.error){ throw new Error(result.error.message || 'Google Vision API error'); }
-      rawText = (result && result.fullTextAnnotation && result.fullTextAnnotation.text) || '';
-    }catch(err){
-      visionErr = err;
-    }
-  }
-
-  if(rawText !== null){
-    const names = guessNames(rawText);
-    $('rawText').textContent = rawText || '(no response)';
-    $('rawTextWrap').style.display = rawText ? 'block' : 'none';
+  $('ocrStatus').textContent = 'Reading name card (offline recognition)…';
+  try{
+    const localText = await localOcrRecognize(dataUrl);
+    const names = guessNames(localText);
+    $('rawText').textContent = localText || '(no response)';
+    $('rawTextWrap').style.display = localText ? 'block' : 'none';
     $('ocrStatus').textContent = (names.chineseName || names.englishName) ? 'Scan complete. Please confirm the name(s) below.' : 'Could not read a name clearly — please type it manually.';
     $('chineseNameInput').value = names.chineseName;
     $('englishNameInput').value = names.englishName;
@@ -784,25 +791,8 @@ async function runOcr(dataUrl){
     $('confirmCard').style.display = 'block';
     checkSimilar(names.chineseName, names.englishName);
     autoFillFromNames(names.chineseName, names.englishName);
-    return;
-  }
-
-  $('ocrStatus').textContent = 'Google Vision unavailable (' + visionErr.message + ') — trying local offline recognition…';
-  try{
-    const localText = await localOcrRecognize(dataUrl);
-    const names = guessNames(localText);
-    $('rawText').textContent = localText || '(no response)';
-    $('rawTextWrap').style.display = localText ? 'block' : 'none';
-    $('ocrStatus').innerHTML = '<span style="color:var(--amber);">⚠ Used local offline recognition (lower accuracy than usual) — please double-check the name(s) below.</span>';
-    $('chineseNameInput').value = names.chineseName;
-    $('englishNameInput').value = names.englishName;
-    $('companyInput').value = '';
-    $('mobileInput').value = '';
-    $('confirmCard').style.display = 'block';
-    checkSimilar(names.chineseName, names.englishName);
-    autoFillFromNames(names.chineseName, names.englishName);
   }catch(localErr){
-    $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(visionErr.message) + '. Please type the name manually.</span>';
+    $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(localErr.message) + '. Please type the name manually.</span>';
     $('chineseNameInput').value = '';
     $('englishNameInput').value = '';
     $('companyInput').value = '';
@@ -929,7 +919,7 @@ function setLocalOcrNote(html, bg, color){
 function renderLocalOcrNoteIdle(){
   const primed = (() => { try{ return !!localStorage.getItem(LOCAL_OCR_PRIMED_KEY); }catch(e){ return false; } })();
   if(primed){
-    setLocalOcrNote('✅ Offline OCR is ready on this device — Google Vision AND local recognition will both work with no internet.', 'var(--green-bg)', 'var(--green)');
+    setLocalOcrNote('✅ Offline OCR is ready on this device — scanning will work with no internet.', 'var(--green-bg)', 'var(--green)');
   }else{
     setLocalOcrNote(
       '⚠ Offline OCR has not been downloaded on this device yet. It needs internet ONE TIME to download (~30MB, for the best accuracy on rare Chinese characters), then it works forever with no network. ' +
