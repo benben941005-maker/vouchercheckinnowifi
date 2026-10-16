@@ -75,8 +75,8 @@
   .btn-small{padding:6px 10px;font-size:12px;width:auto;}
   .btn-row{display:flex;gap:10px;}
   .btn-row button{flex:1;}
-  input[type=text]{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;}
-  input[type=text].no-match{border-color:var(--red);background:var(--red-bg);color:var(--red);}
+  input[type=text],select{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;background:#fff;color:var(--text);}
+  input[type=text].no-match, select.no-match{border-color:var(--red);background:var(--red-bg);color:var(--red);}
   label{font-size:13px;color:var(--muted);font-weight:600;}
   .field{margin-bottom:12px;}
   #preview{max-width:100%;display:none;border-radius:8px;margin-top:10px;border:1px solid var(--border);}
@@ -193,6 +193,22 @@
     <div class="field">
       <label for="mobileInput">Mobile No.</label>
       <input type="text" id="mobileInput" placeholder="Mobile number">
+    </div>
+    <div class="field">
+      <label for="paidForEventInput">Paid for Event 已付款 (auto-filled if matched — turns red if not, please ask &amp; select)</label>
+      <select id="paidForEventInput">
+        <option value="">— Select —</option>
+        <option value="Yes">Yes 是</option>
+        <option value="No">No 否</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="paynowInput">Mobile linked to PayNow (auto-filled if matched — turns red if not, please ask &amp; select)</label>
+      <select id="paynowInput">
+        <option value="">— Select —</option>
+        <option value="Yes">Yes 是</option>
+        <option value="No">No 否</option>
+      </select>
     </div>
     <div id="registrationMatchNote" style="display:none;font-size:12px;color:var(--green);background:var(--green-bg);padding:8px 10px;border-radius:8px;margin-bottom:12px;"></div>
     <div id="similarWarning"></div>
@@ -385,7 +401,12 @@ function parseRegistrationRows(rows){
     organization: findColumnIndex(headers, ['organization', '单位']),
     mobile: findColumnIndex(headers, ['mobile', '手机'], ['paynow']),
     email: findColumnIndex(headers, ['email', '电邮']),
-    physicianNo: findColumnIndex(headers, ['physician', '中医师'])
+    physicianNo: findColumnIndex(headers, ['physician', '中医师']),
+    // From the registration form's own Excel export (COLUMNS in
+    // conference_registration.html): "Paid for Event 已付款" and "Mobile
+    // linked to PayNow". Neither pattern collides with any other column.
+    paidForEvent: findColumnIndex(headers, ['paid', '已付款']),
+    mobileLinkedPaynow: findColumnIndex(headers, ['paynow'])
   };
   const get = (row, idx) => idx >= 0 && row[idx] != null ? String(row[idx]).trim() : '';
   const out = [];
@@ -399,7 +420,9 @@ function parseRegistrationRows(rows){
       organization: get(row, col.organization),
       mobile: get(row, col.mobile),
       email: get(row, col.email),
-      physicianNo: get(row, col.physicianNo)
+      physicianNo: get(row, col.physicianNo),
+      paidForEvent: get(row, col.paidForEvent),
+      mobileLinkedPaynow: get(row, col.mobileLinkedPaynow)
     };
     if(entry.chineseName || entry.englishName) out.push(entry);
   }
@@ -486,6 +509,8 @@ function applyRegistrationMatch(result){
   const mobileInput = $('mobileInput');
   const chineseNameInput = $('chineseNameInput');
   const englishNameInput = $('englishNameInput');
+  const paidForEventInput = $('paidForEventInput');
+  const paynowInput = $('paynowInput');
   if(!result){
     note.className = '';
     note.style.display = 'block';
@@ -494,11 +519,18 @@ function applyRegistrationMatch(result){
     note.innerHTML = '✗ No matching conference registration found — please check/type Organization and Mobile No. manually.';
     companyInput.classList.add('no-match');
     mobileInput.classList.add('no-match');
+    // No registration record means there's no Paid/PayNow answer to pull in
+    // either — turn these red too, so staff know to ask the guest directly
+    // and select manually rather than assume anything.
+    paidForEventInput.classList.add('no-match');
+    paynowInput.classList.add('no-match');
     return;
   }
   const match = result.match;
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
+  paidForEventInput.classList.remove('no-match');
+  paynowInput.classList.remove('no-match');
   // Only fill in a field if the user hasn't already typed something into it —
   // never silently overwrite a manual correction. This also bridges a card
   // scan that only picked up ONE of the two printed names: once matched to a
@@ -509,6 +541,8 @@ function applyRegistrationMatch(result){
   if(!englishNameInput.value.trim() && match.englishName) englishNameInput.value = match.englishName;
   if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
   if(!mobileInput.value.trim() && match.mobile) mobileInput.value = match.mobile;
+  if(!paidForEventInput.value && match.paidForEvent) paidForEventInput.value = /^yes$/i.test(match.paidForEvent) ? 'Yes' : 'No';
+  if(!paynowInput.value && match.mobileLinkedPaynow) paynowInput.value = /^yes$/i.test(match.mobileLinkedPaynow) ? 'Yes' : 'No';
   const parts = [];
   if(match.chineseName) parts.push(match.chineseName);
   if(match.englishName) parts.push(match.englishName);
@@ -558,18 +592,31 @@ function applyExistingEntry(existing){
   const mobileInput = $('mobileInput');
   const chineseNameInput = $('chineseNameInput');
   const englishNameInput = $('englishNameInput');
+  const paidForEventInput = $('paidForEventInput');
+  const paynowInput = $('paynowInput');
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
+  paidForEventInput.classList.remove('no-match');
+  paynowInput.classList.remove('no-match');
   if(!chineseNameInput.value.trim() && existing.chineseName) chineseNameInput.value = existing.chineseName;
   if(!englishNameInput.value.trim() && existing.englishName) englishNameInput.value = existing.englishName;
   if(!companyInput.value.trim() && existing.company) companyInput.value = existing.company;
   if(!mobileInput.value.trim() && existing.mobile) mobileInput.value = existing.mobile;
+  if(!paidForEventInput.value && existing.paidForEvent) paidForEventInput.value = /^yes$/i.test(existing.paidForEvent) ? 'Yes' : 'No';
+  if(!paynowInput.value && existing.mobileLinkedPaynow) paynowInput.value = /^yes$/i.test(existing.mobileLinkedPaynow) ? 'Yes' : 'No';
+
+  let paidNote = '';
+  if(existing.paidForEvent){
+    const paidYes = /^yes$/i.test(existing.paidForEvent);
+    paidNote = ' ' + (paidYes ? 'Paid: Yes.' : '<b style="color:var(--red);">Paid: No.</b>');
+  }
   note.style.display = 'block';
   note.style.color = 'var(--blue)';
   note.style.background = 'var(--blue-bg)';
   note.innerHTML = '↩ Already checked in at ' + escapeHtml(fmtTime(existing.checkInAtMs)) +
     ' — Name/Organization/Mobile No. copied from that check-in record.' +
-    (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '');
+    (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '') +
+    paidNote;
 }
 // Single entry point used whenever either name field changes (after a scan
 // or manual edit). Registration match runs FIRST (backfilling both name
@@ -629,6 +676,8 @@ function doRegNoLookup(){
   $('englishNameInput').value = reg.englishName || '';
   $('companyInput').value = '';
   $('mobileInput').value = '';
+  $('paidForEventInput').value = '';
+  $('paynowInput').value = '';
   $('confirmCard').style.display = 'block';
   onNameFieldInput();
 }
@@ -788,6 +837,8 @@ async function runOcr(dataUrl){
     $('englishNameInput').value = names.englishName;
     $('companyInput').value = '';
     $('mobileInput').value = '';
+    $('paidForEventInput').value = '';
+    $('paynowInput').value = '';
     $('confirmCard').style.display = 'block';
     checkSimilar(names.chineseName, names.englishName);
     autoFillFromNames(names.chineseName, names.englishName);
@@ -797,6 +848,8 @@ async function runOcr(dataUrl){
     $('englishNameInput').value = '';
     $('companyInput').value = '';
     $('mobileInput').value = '';
+    $('paidForEventInput').value = '';
+    $('paynowInput').value = '';
     $('confirmCard').style.display = 'block';
     applyRegistrationMatch(null);
   }
@@ -1348,12 +1401,27 @@ $('checkinActionBtn').addEventListener('click', () => {
   const englishName = $('englishNameInput').value.trim();
   const company = $('companyInput').value.trim();
   const mobile = $('mobileInput').value.trim();
+  const paidForEvent = $('paidForEventInput').value;
+  const mobileLinkedPaynow = $('paynowInput').value;
   if(!chineseName && !englishName){ alert('Please enter at least one of Chinese Name / English Name before checking in.'); return; }
 
   const registrationMatch = findRegistrationMatch(chineseName, englishName);
   if(!registrationMatch && !mobile){
     alert('No matching conference registration found for this name. Please type in the Mobile No. manually before checking in.');
     $('mobileInput').focus();
+    return;
+  }
+  // Paid/PayNow must always be an explicit Yes/No before check-in — whether
+  // it was auto-filled from a registration match or (for an unmatched
+  // walk-in, shown red) typed in by hand — never saved blank.
+  if(!paidForEvent){
+    alert('Please select Paid for Event (Yes/No) before checking in.');
+    $('paidForEventInput').focus();
+    return;
+  }
+  if(!mobileLinkedPaynow){
+    alert('Please select Mobile linked to PayNow (Yes/No) before checking in.');
+    $('paynowInput').focus();
     return;
   }
   const signature = getSignatureDataUrl();
@@ -1377,7 +1445,9 @@ $('checkinActionBtn').addEventListener('click', () => {
     mobile: mobile || '',
     email: (registrationMatch && registrationMatch.email) || '',
     physicianNo: (registrationMatch && registrationMatch.physicianNo) || '',
-    registrationMatched: !!registrationMatch
+    registrationMatched: !!registrationMatch,
+    paidForEvent: paidForEvent || '',
+    mobileLinkedPaynow: mobileLinkedPaynow || ''
   });
   showBanner('ok', `✓ ${combineNames(chineseName, englishName)} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`);
   playSuccessTone();
@@ -1439,16 +1509,23 @@ function renderTable(){
     const nameCell = e.chineseName && e.englishName
       ? `${escapeHtml(e.chineseName)}<br><span style="color:var(--muted);font-size:11px;">${escapeHtml(e.englishName)}</span>`
       : escapeHtml(e.chineseName || e.englishName || e.name || '');
+    let paidCell = '<span class="muted-dash">—</span>';
+    if(e.paidForEvent){
+      const paidYes = /^yes$/i.test(e.paidForEvent);
+      paidCell = paidYes ? 'Paid: Yes' : '<b style="color:var(--red);">Paid: No</b>';
+      if(e.mobileLinkedPaynow) paidCell += `<br><span style="color:var(--muted);font-size:11px;">PayNow: ${escapeHtml(e.mobileLinkedPaynow)}</span>`;
+    }
     return `<tr>
       <td>${nameCell}</td>
       <td>${escapeHtml(e.company||'')}</td>
+      <td>${paidCell}</td>
       <td>${fmtTime(e.checkInAtMs)}</td>
       <td>${fmtTime(e.checkOutAtMs)}</td>
       <td>${statusBadge}</td>
       <td>${sigIn}${sigOut}</td>
     </tr>`;
   }).join('');
-  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Company</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Company</th><th>Paid / PayNow</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th></tr></thead><tbody>${rows}</tbody></table>`;
   $('tableWrap').querySelectorAll('.sig-thumb').forEach(img => {
     img.addEventListener('click', () => openSigView(img.src, img.getAttribute('data-sig-label')));
   });
@@ -1480,11 +1557,11 @@ $('exportBtn').addEventListener('click', async () => {
   try{
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Check-Ins');
-    sheet.addRow(['Chinese Name','English Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature']);
+    sheet.addRow(['Chinese Name','English Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Paid for Event','Mobile linked to PayNow','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature']);
     sheet.getRow(1).font = { bold: true };
     sheet.columns = [
       { width: 18 }, { width: 20 }, { width: 20 }, { width: 16 },
-      { width: 22 }, { width: 18 }, { width: 22 }, { width: 20 }, { width: 20 },
+      { width: 22 }, { width: 18 }, { width: 22 }, { width: 16 }, { width: 18 }, { width: 20 }, { width: 20 },
       { width: 14 }, { width: 20 }, { width: 20 }
     ];
     entries.forEach((e, i) => {
@@ -1494,6 +1571,8 @@ $('exportBtn').addEventListener('click', async () => {
       sheet.addRow([
         e.chineseName || '', e.englishName || '', e.company || '', e.mobile || '', e.email || '', e.physicianNo || '',
         matched ? 'Matched' : 'No Match — Verify',
+        e.paidForEvent || '',
+        e.mobileLinkedPaynow || '',
         e.checkInAtMs ? new Date(e.checkInAtMs).toLocaleString() : '',
         e.checkOutAtMs ? new Date(e.checkOutAtMs).toLocaleString() : '',
         statusText, '', ''
@@ -1504,15 +1583,22 @@ $('exportBtn').addEventListener('click', async () => {
         matchCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE8E6' } };
         matchCell.font = { color: { argb: 'FFC5221F' }, bold: true };
       }
+      // Flag "Paid for Event" = No the same way, so unpaid guests stand out
+      // just as clearly as unmatched ones.
+      if(e.paidForEvent && /^no$/i.test(e.paidForEvent)){
+        const paidCell = sheet.getRow(rowIndex).getCell(8);
+        paidCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE8E6' } };
+        paidCell.font = { color: { argb: 'FFC5221F' }, bold: true };
+      }
       const sigIn = dataUrlToBase64AndExt(e.checkInSignature);
       if(sigIn){
         const imgId = workbook.addImage({ base64: sigIn.base64, extension: sigIn.extension });
-        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 12.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
       const sigOut = dataUrlToBase64AndExt(e.checkOutSignature);
       if(sigOut){
         const imgId = workbook.addImage({ base64: sigOut.base64, extension: sigOut.extension });
-        sheet.addImage(imgId, { tl: { col: 11.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 13.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
     });
     const buffer = await workbook.xlsx.writeBuffer();
